@@ -1,0 +1,32 @@
+FROM continuumio/miniconda3:latest
+WORKDIR /elv
+
+RUN conda create -n mlpod python=3.11 -y
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends build-essential ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+# which backends to install: "ct2" omits torch entirely (production),
+# "all" adds openai-whisper + torch + benchmark deps
+ARG EXTRAS=ct2
+
+COPY setup.py .
+RUN mkdir -p src && /opt/conda/envs/mlpod/bin/pip install --no-cache-dir ".[${EXTRAS}]"
+
+# ctranslate2 loads cuBLAS/cuDNN from the pip nvidia wheels rather than a system
+# CUDA install, so they have to be on the loader path explicitly
+ENV LD_LIBRARY_PATH=/opt/conda/envs/mlpod/lib/python3.11/site-packages/nvidia/cublas/lib:/opt/conda/envs/mlpod/lib/python3.11/site-packages/nvidia/cudnn/lib:${LD_LIBRARY_PATH}
+
+# staged by build.sh; empty when WEIGHTS=none
+COPY models ./models
+
+# set to the baked weight root, or left empty so config.yml's ~/.cache path
+# applies and the cache is expected as a mount
+ARG WEIGHTS_DIR=""
+ENV WEIGHTS_DIR=${WEIGHTS_DIR}
+
+COPY src ./src
+COPY config.yml config.py run.py download_weights.py ./
+
+ENTRYPOINT ["/opt/conda/envs/mlpod/bin/python", "-u", "run.py"]

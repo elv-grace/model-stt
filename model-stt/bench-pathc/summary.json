@@ -1,0 +1,37 @@
+[
+  {
+    "system": "translate-llm",
+    "backend": "faster-whisper",
+    "requested_model": "large-v3-turbo",
+    "effective_model": "large-v3-turbo",
+    "task": "translate",
+    "load_seconds": 3.07,
+    "total_audio_seconds": 470.95,
+    "total_wall_seconds": 76.97,
+    "rtf": 6.12,
+    "peak_gpu_mib": 2556,
+    "files": [
+      {
+        "file": "test-files/les_champs_elysees.mp3",
+        "audio_seconds": 162.011,
+        "wall_seconds": 25.423,
+        "rtf": 6.37,
+        "n_tags": 209
+      },
+      {
+        "file": "test-files/ji_xiang_san_bao.mp3",
+        "audio_seconds": 185.13,
+        "wall_seconds": 27.546,
+        "rtf": 6.72,
+        "n_tags": 174
+      },
+      {
+        "file": "test-files/korean_144p.mp4",
+        "audio_seconds": 123.809,
+        "wall_seconds": 23.998,
+        "rtf": 5.16,
+        "n_tags": 92
+      }
+    ]
+  }
+]

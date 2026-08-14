@@ -1,0 +1,576 @@
+[
+  {
+    "system": "large-v3-ct2",
+    "backend": "faster-whisper",
+    "requested_model": "large-v3",
+    "effective_model": "large-v3",
+    "task": "transcribe",
+    "load_seconds": 3.79,
+    "total_audio_seconds": 437.4,
+    "total_wall_seconds": 22.61,
+    "rtf": 19.34,
+    "peak_gpu_mib": 4252,
+    "files": [
+      {
+        "file": "fleurs/audio/fr/1685.wav",
+        "audio_seconds": 8.1,
+        "wall_seconds": 0.71,
+        "rtf": 11.41,
+        "n_tags": 35
+      },
+      {
+        "file": "fleurs/audio/fr/1690.wav",
+        "audio_seconds": 23.4,
+        "wall_seconds": 0.778,
+        "rtf": 30.08,
+        "n_tags": 65
+      },
+      {
+        "file": "fleurs/audio/fr/1696.wav",
+        "audio_seconds": 7.68,
+        "wall_seconds": 0.457,
+        "rtf": 16.79,
+        "n_tags": 27
+      },
+      {
+        "file": "fleurs/audio/fr/1703.wav",
+        "audio_seconds": 7.2,
+        "wall_seconds": 0.373,
+        "rtf": 19.3,
+        "n_tags": 15
+      },
+      {
+        "file": "fleurs/audio/fr/1713.wav",
+        "audio_seconds": 10.08,
+        "wall_seconds": 0.494,
+        "rtf": 20.41,
+        "n_tags": 34
+      },
+      {
+        "file": "fleurs/audio/fr/1720.wav",
+        "audio_seconds": 5.04,
+        "wall_seconds": 0.36,
+        "rtf": 13.99,
+        "n_tags": 18
+      },
+      {
+        "file": "fleurs/audio/fr/1724.wav",
+        "audio_seconds": 10.74,
+        "wall_seconds": 0.429,
+        "rtf": 25.02,
+        "n_tags": 24
+      },
+      {
+        "file": "fleurs/audio/fr/1729.wav",
+        "audio_seconds": 14.82,
+        "wall_seconds": 0.615,
+        "rtf": 24.09,
+        "n_tags": 50
+      },
+      {
+        "file": "fleurs/audio/fr/1742.wav",
+        "audio_seconds": 8.94,
+        "wall_seconds": 0.415,
+        "rtf": 21.53,
+        "n_tags": 25
+      },
+      {
+        "file": "fleurs/audio/fr/1745.wav",
+        "audio_seconds": 12.24,
+        "wall_seconds": 0.494,
+        "rtf": 24.76,
+        "n_tags": 31
+      },
+      {
+        "file": "fleurs/audio/fr/1753.wav",
+        "audio_seconds": 13.8,
+        "wall_seconds": 0.516,
+        "rtf": 26.74,
+        "n_tags": 35
+      },
+      {
+        "file": "fleurs/audio/fr/1762.wav",
+        "audio_seconds": 6.66,
+        "wall_seconds": 0.372,
+        "rtf": 17.92,
+        "n_tags": 18
+      },
+      {
+        "file": "fleurs/audio/fr/1782.wav",
+        "audio_seconds": 13.44,
+        "wall_seconds": 0.606,
+        "rtf": 22.17,
+        "n_tags": 43
+      },
+      {
+        "file": "fleurs/audio/fr/1805.wav",
+        "audio_seconds": 10.2,
+        "wall_seconds": 0.381,
+        "rtf": 26.79,
+        "n_tags": 18
+      },
+      {
+        "file": "fleurs/audio/fr/1831.wav",
+        "audio_seconds": 11.52,
+        "wall_seconds": 0.523,
+        "rtf": 22.04,
+        "n_tags": 28
+      },
+      {
+        "file": "fleurs/audio/fr/1843.wav",
+        "audio_seconds": 13.68,
+        "wall_seconds": 0.476,
+        "rtf": 28.75,
+        "n_tags": 27
+      },
+      {
+        "file": "fleurs/audio/fr/1851.wav",
+        "audio_seconds": 10.74,
+        "wall_seconds": 0.456,
+        "rtf": 23.57,
+        "n_tags": 24
+      },
+      {
+        "file": "fleurs/audio/fr/1853.wav",
+        "audio_seconds": 7.2,
+        "wall_seconds": 0.377,
+        "rtf": 19.11,
+        "n_tags": 20
+      },
+      {
+        "file": "fleurs/audio/fr/1855.wav",
+        "audio_seconds": 11.64,
+        "wall_seconds": 0.531,
+        "rtf": 21.9,
+        "n_tags": 36
+      },
+      {
+        "file": "fleurs/audio/fr/1857.wav",
+        "audio_seconds": 8.28,
+        "wall_seconds": 0.443,
+        "rtf": 18.71,
+        "n_tags": 27
+      },
+      {
+        "file": "fleurs/audio/fr/1858.wav",
+        "audio_seconds": 11.16,
+        "wall_seconds": 0.44,
+        "rtf": 25.37,
+        "n_tags": 23
+      },
+      {
+        "file": "fleurs/audio/fr/1882.wav",
+        "audio_seconds": 14.28,
+        "wall_seconds": 0.483,
+        "rtf": 29.59,
+        "n_tags": 32
+      },
+      {
+        "file": "fleurs/audio/fr/1894.wav",
+        "audio_seconds": 8.64,
+        "wall_seconds": 0.381,
+        "rtf": 22.68,
+        "n_tags": 19
+      },
+      {
+        "file": "fleurs/audio/fr/1898.wav",
+        "audio_seconds": 14.28,
+        "wall_seconds": 0.529,
+        "rtf": 27.01,
+        "n_tags": 34
+      },
+      {
+        "file": "fleurs/audio/fr/1912.wav",
+        "audio_seconds": 7.8,
+        "wall_seconds": 0.437,
+        "rtf": 17.83,
+        "n_tags": 25
+      },
+      {
+        "file": "fleurs/audio/fr/1913.wav",
+        "audio_seconds": 10.2,
+        "wall_seconds": 0.695,
+        "rtf": 14.67,
+        "n_tags": 22
+      },
+      {
+        "file": "fleurs/audio/fr/1917.wav",
+        "audio_seconds": 10.68,
+        "wall_seconds": 0.416,
+        "rtf": 25.7,
+        "n_tags": 23
+      },
+      {
+        "file": "fleurs/audio/fr/1928.wav",
+        "audio_seconds": 8.16,
+        "wall_seconds": 0.39,
+        "rtf": 20.94,
+        "n_tags": 20
+      },
+      {
+        "file": "fleurs/audio/fr/1929.wav",
+        "audio_seconds": 8.4,
+        "wall_seconds": 0.425,
+        "rtf": 19.77,
+        "n_tags": 28
+      },
+      {
+        "file": "fleurs/audio/fr/1933.wav",
+        "audio_seconds": 14.28,
+        "wall_seconds": 4.077,
+        "rtf": 3.5,
+        "n_tags": 45
+      },
+      {
+        "file": "fleurs/audio/fr/1937.wav",
+        "audio_seconds": 27.6,
+        "wall_seconds": 0.925,
+        "rtf": 29.84,
+        "n_tags": 73
+      },
+      {
+        "file": "fleurs/audio/fr/1940.wav",
+        "audio_seconds": 14.4,
+        "wall_seconds": 0.523,
+        "rtf": 27.55,
+        "n_tags": 36
+      },
+      {
+        "file": "fleurs/audio/fr/1980.wav",
+        "audio_seconds": 11.64,
+        "wall_seconds": 0.435,
+        "rtf": 26.75,
+        "n_tags": 25
+      },
+      {
+        "file": "fleurs/audio/fr/1982.wav",
+        "audio_seconds": 5.94,
+        "wall_seconds": 0.397,
+        "rtf": 14.95,
+        "n_tags": 23
+      },
+      {
+        "file": "fleurs/audio/fr/1987.wav",
+        "audio_seconds": 10.2,
+        "wall_seconds": 0.409,
+        "rtf": 24.93,
+        "n_tags": 21
+      },
+      {
+        "file": "fleurs/audio/fr/1989.wav",
+        "audio_seconds": 15.36,
+        "wall_seconds": 0.52,
+        "rtf": 29.55,
+        "n_tags": 40
+      },
+      {
+        "file": "fleurs/audio/fr/1993.wav",
+        "audio_seconds": 12.36,
+        "wall_seconds": 0.466,
+        "rtf": 26.51,
+        "n_tags": 24
+      },
+      {
+        "file": "fleurs/audio/fr/2004.wav",
+        "audio_seconds": 8.34,
+        "wall_seconds": 0.409,
+        "rtf": 20.37,
+        "n_tags": 25
+      },
+      {
+        "file": "fleurs/audio/fr/2006.wav",
+        "audio_seconds": 8.28,
+        "wall_seconds": 0.45,
+        "rtf": 18.4,
+        "n_tags": 29
+      }
+    ]
+  },
+  {
+    "system": "large-v3-openai",
+    "backend": "openai",
+    "requested_model": "large-v3",
+    "effective_model": "large-v3",
+    "task": "transcribe",
+    "load_seconds": 15.48,
+    "total_audio_seconds": 437.4,
+    "total_wall_seconds": 50.75,
+    "rtf": 8.62,
+    "peak_gpu_mib": 10298,
+    "files": [
+      {
+        "file": "fleurs/audio/fr/1685.wav",
+        "audio_seconds": 8.1,
+        "wall_seconds": 2.125,
+        "rtf": 3.81,
+        "n_tags": 35
+      },
+      {
+        "file": "fleurs/audio/fr/1690.wav",
+        "audio_seconds": 23.4,
+        "wall_seconds": 2.122,
+        "rtf": 11.03,
+        "n_tags": 65
+      },
+      {
+        "file": "fleurs/audio/fr/1696.wav",
+        "audio_seconds": 7.68,
+        "wall_seconds": 1.164,
+        "rtf": 6.6,
+        "n_tags": 27
+      },
+      {
+        "file": "fleurs/audio/fr/1703.wav",
+        "audio_seconds": 7.2,
+        "wall_seconds": 0.891,
+        "rtf": 8.08,
+        "n_tags": 15
+      },
+      {
+        "file": "fleurs/audio/fr/1713.wav",
+        "audio_seconds": 10.08,
+        "wall_seconds": 1.284,
+        "rtf": 7.85,
+        "n_tags": 34
+      },
+      {
+        "file": "fleurs/audio/fr/1720.wav",
+        "audio_seconds": 5.04,
+        "wall_seconds": 0.856,
+        "rtf": 5.89,
+        "n_tags": 18
+      },
+      {
+        "file": "fleurs/audio/fr/1724.wav",
+        "audio_seconds": 10.74,
+        "wall_seconds": 1.002,
+        "rtf": 10.72,
+        "n_tags": 24
+      },
+      {
+        "file": "fleurs/audio/fr/1729.wav",
+        "audio_seconds": 14.82,
+        "wall_seconds": 1.5,
+        "rtf": 9.88,
+        "n_tags": 50
+      },
+      {
+        "file": "fleurs/audio/fr/1742.wav",
+        "audio_seconds": 8.94,
+        "wall_seconds": 0.853,
+        "rtf": 10.48,
+        "n_tags": 25
+      },
+      {
+        "file": "fleurs/audio/fr/1745.wav",
+        "audio_seconds": 12.24,
+        "wall_seconds": 1.124,
+        "rtf": 10.89,
+        "n_tags": 31
+      },
+      {
+        "file": "fleurs/audio/fr/1753.wav",
+        "audio_seconds": 13.8,
+        "wall_seconds": 1.246,
+        "rtf": 11.08,
+        "n_tags": 35
+      },
+      {
+        "file": "fleurs/audio/fr/1762.wav",
+        "audio_seconds": 6.66,
+        "wall_seconds": 0.733,
+        "rtf": 9.09,
+        "n_tags": 18
+      },
+      {
+        "file": "fleurs/audio/fr/1782.wav",
+        "audio_seconds": 13.44,
+        "wall_seconds": 1.444,
+        "rtf": 9.31,
+        "n_tags": 43
+      },
+      {
+        "file": "fleurs/audio/fr/1805.wav",
+        "audio_seconds": 10.2,
+        "wall_seconds": 0.87,
+        "rtf": 11.72,
+        "n_tags": 18
+      },
+      {
+        "file": "fleurs/audio/fr/1831.wav",
+        "audio_seconds": 11.52,
+        "wall_seconds": 1.325,
+        "rtf": 8.69,
+        "n_tags": 28
+      },
+      {
+        "file": "fleurs/audio/fr/1843.wav",
+        "audio_seconds": 13.68,
+        "wall_seconds": 1.125,
+        "rtf": 12.16,
+        "n_tags": 27
+      },
+      {
+        "file": "fleurs/audio/fr/1851.wav",
+        "audio_seconds": 10.74,
+        "wall_seconds": 1.085,
+        "rtf": 9.9,
+        "n_tags": 24
+      },
+      {
+        "file": "fleurs/audio/fr/1853.wav",
+        "audio_seconds": 7.2,
+        "wall_seconds": 0.908,
+        "rtf": 7.93,
+        "n_tags": 20
+      },
+      {
+        "file": "fleurs/audio/fr/1855.wav",
+        "audio_seconds": 11.64,
+        "wall_seconds": 1.315,
+        "rtf": 8.85,
+        "n_tags": 36
+      },
+      {
+        "file": "fleurs/audio/fr/1857.wav",
+        "audio_seconds": 8.28,
+        "wall_seconds": 1.072,
+        "rtf": 7.73,
+        "n_tags": 27
+      },
+      {
+        "file": "fleurs/audio/fr/1858.wav",
+        "audio_seconds": 11.16,
+        "wall_seconds": 0.951,
+        "rtf": 11.74,
+        "n_tags": 23
+      },
+      {
+        "file": "fleurs/audio/fr/1882.wav",
+        "audio_seconds": 14.28,
+        "wall_seconds": 1.071,
+        "rtf": 13.33,
+        "n_tags": 32
+      },
+      {
+        "file": "fleurs/audio/fr/1894.wav",
+        "audio_seconds": 8.64,
+        "wall_seconds": 0.751,
+        "rtf": 11.5,
+        "n_tags": 19
+      },
+      {
+        "file": "fleurs/audio/fr/1898.wav",
+        "audio_seconds": 14.28,
+        "wall_seconds": 1.23,
+        "rtf": 11.61,
+        "n_tags": 34
+      },
+      {
+        "file": "fleurs/audio/fr/1912.wav",
+        "audio_seconds": 7.8,
+        "wall_seconds": 1.026,
+        "rtf": 7.6,
+        "n_tags": 25
+      },
+      {
+        "file": "fleurs/audio/fr/1913.wav",
+        "audio_seconds": 10.2,
+        "wall_seconds": 1.784,
+        "rtf": 5.72,
+        "n_tags": 22
+      },
+      {
+        "file": "fleurs/audio/fr/1917.wav",
+        "audio_seconds": 10.68,
+        "wall_seconds": 0.967,
+        "rtf": 11.05,
+        "n_tags": 23
+      },
+      {
+        "file": "fleurs/audio/fr/1928.wav",
+        "audio_seconds": 8.16,
+        "wall_seconds": 0.865,
+        "rtf": 9.44,
+        "n_tags": 20
+      },
+      {
+        "file": "fleurs/audio/fr/1929.wav",
+        "audio_seconds": 8.4,
+        "wall_seconds": 0.902,
+        "rtf": 9.31,
+        "n_tags": 28
+      },
+      {
+        "file": "fleurs/audio/fr/1933.wav",
+        "audio_seconds": 14.28,
+        "wall_seconds": 6.601,
+        "rtf": 2.16,
+        "n_tags": 39
+      },
+      {
+        "file": "fleurs/audio/fr/1937.wav",
+        "audio_seconds": 27.6,
+        "wall_seconds": 2.456,
+        "rtf": 11.24,
+        "n_tags": 73
+      },
+      {
+        "file": "fleurs/audio/fr/1940.wav",
+        "audio_seconds": 14.4,
+        "wall_seconds": 1.315,
+        "rtf": 10.95,
+        "n_tags": 36
+      },
+      {
+        "file": "fleurs/audio/fr/1980.wav",
+        "audio_seconds": 11.64,
+        "wall_seconds": 0.944,
+        "rtf": 12.33,
+        "n_tags": 25
+      },
+      {
+        "file": "fleurs/audio/fr/1982.wav",
+        "audio_seconds": 5.94,
+        "wall_seconds": 0.882,
+        "rtf": 6.73,
+        "n_tags": 23
+      },
+      {
+        "file": "fleurs/audio/fr/1987.wav",
+        "audio_seconds": 10.2,
+        "wall_seconds": 0.881,
+        "rtf": 11.57,
+        "n_tags": 21
+      },
+      {
+        "file": "fleurs/audio/fr/1989.wav",
+        "audio_seconds": 15.36,
+        "wall_seconds": 1.185,
+        "rtf": 12.96,
+        "n_tags": 40
+      },
+      {
+        "file": "fleurs/audio/fr/1993.wav",
+        "audio_seconds": 12.36,
+        "wall_seconds": 1.024,
+        "rtf": 12.07,
+        "n_tags": 24
+      },
+      {
+        "file": "fleurs/audio/fr/2004.wav",
+        "audio_seconds": 8.34,
+        "wall_seconds": 0.896,
+        "rtf": 9.31,
+        "n_tags": 25
+      },
+      {
+        "file": "fleurs/audio/fr/2006.wav",
+        "audio_seconds": 8.28,
+        "wall_seconds": 0.977,
+        "rtf": 8.47,
+        "n_tags": 29
+      }
+    ]
+  }
+]

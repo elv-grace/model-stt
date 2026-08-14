@@ -1,0 +1,7 @@
+test-files/
+test_output/*
+fleurs/
+*.egg-info
+__pycache__
+.pytest_cache/
+.asr-cache/

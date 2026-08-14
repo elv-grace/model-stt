@@ -1,0 +1,86 @@
+[
+  {
+    "system": "translate-ct2",
+    "backend": "faster-whisper",
+    "requested_model": "large-v3",
+    "effective_model": "large-v3",
+    "task": "translate",
+    "load_seconds": 3.76,
+    "total_audio_seconds": 793.78,
+    "total_wall_seconds": 167.19,
+    "rtf": 4.75,
+    "peak_gpu_mib": 4220,
+    "files": [
+      {
+        "file": "test-files/les_champs_elysees.mp3",
+        "audio_seconds": 162.011,
+        "wall_seconds": 13.265,
+        "rtf": 12.21,
+        "n_tags": 237
+      },
+      {
+        "file": "test-files/korean_144p.mp4",
+        "audio_seconds": 123.809,
+        "wall_seconds": 7.492,
+        "rtf": 16.53,
+        "n_tags": 89
+      },
+      {
+        "file": "test-files/ji_xiang_san_bao.mp3",
+        "audio_seconds": 185.13,
+        "wall_seconds": 36.347,
+        "rtf": 5.09,
+        "n_tags": 47
+      },
+      {
+        "file": "test-files/foreign_news_144p.mp4",
+        "audio_seconds": 322.827,
+        "wall_seconds": 110.089,
+        "rtf": 2.93,
+        "n_tags": 396
+      }
+    ]
+  },
+  {
+    "system": "translate-openai",
+    "backend": "openai",
+    "requested_model": "large-v3",
+    "effective_model": "large-v3",
+    "task": "translate",
+    "load_seconds": 12.48,
+    "total_audio_seconds": 793.78,
+    "total_wall_seconds": 233.2,
+    "rtf": 3.4,
+    "peak_gpu_mib": 10298,
+    "files": [
+      {
+        "file": "test-files/les_champs_elysees.mp3",
+        "audio_seconds": 162.011,
+        "wall_seconds": 49.131,
+        "rtf": 3.3,
+        "n_tags": 181
+      },
+      {
+        "file": "test-files/korean_144p.mp4",
+        "audio_seconds": 123.809,
+        "wall_seconds": 15.228,
+        "rtf": 8.13,
+        "n_tags": 89
+      },
+      {
+        "file": "test-files/ji_xiang_san_bao.mp3",
+        "audio_seconds": 185.13,
+        "wall_seconds": 54.365,
+        "rtf": 3.41,
+        "n_tags": 97
+      },
+      {
+        "file": "test-files/foreign_news_144p.mp4",
+        "audio_seconds": 322.827,
+        "wall_seconds": 114.477,
+        "rtf": 2.82,
+        "n_tags": 333
+      }
+    ]
+  }
+]

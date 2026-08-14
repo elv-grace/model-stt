@@ -1,0 +1,87 @@
+storage:
+  # Weight cache, populated by download_weights.py. Layout:
+  #   <weights_dir>/openai/*.pt
+  #   <weights_dir>/faster-whisper/<model>/
+  # Images built with WEIGHTS != none bake these in and set WEIGHTS_DIR to point
+  # at the baked copy; images built with WEIGHTS=none expect this path to be
+  # mounted from the host instead.
+  weights_dir: ~/.cache/model-stt/whisper
+
+device: cuda
+
+# Logical model name -> where each backend finds its weights.
+#
+# openai:   file name under <weights_dir>/openai. This MUST stay whisper's canonical
+#           file name: whisper.load_model() only resolves DTW alignment heads when it
+#           is given a registered model *name*, so we pass the name plus a
+#           download_root and let it find the pre-staged file. Loading by path
+#           silently disables alignment heads and wrecks word timestamps.
+# ct2:      directory under <weights_dir>/faster-whisper, or ct2_repo if absent.
+# translate: whether the weights support whisper's native X->en speech translation.
+#           large-v3-turbo was distilled without the translation task and returns
+#           source-language text, so it is false there.
+models:
+  large-v3-turbo:
+    openai: large-v3-turbo.pt
+    ct2: large-v3-turbo
+    ct2_repo: deepdml/faster-whisper-large-v3-turbo-ct2
+    translate: false
+  large-v3:
+    openai: large-v3.pt
+    ct2: large-v3
+    ct2_repo: Systran/faster-whisper-large-v3
+    translate: true
+
+# Substituted in when task=translate + translator=whisper is requested with weights
+# that were not trained for translation (i.e. large-v3-turbo). Must name a model
+# above with translate: true, and that model's weights must be in the image's
+# baked set -- otherwise the substitution triggers a multi-GB download at startup.
+translate_fallback: large-v3
+
+postprocessing:
+  # words more than this far apart (ms) are never merged into one sentence
+  sentence_gap: 5000
+
+runtime:
+  default:
+    # path A: fast multilingual transcription
+    backend: openai
+    model_name: large-v3-turbo
+    task: transcribe
+    translator: whisper
+    language: null
+    word_level: true
+    sentence_level: true
+    # see RuntimeConfig.carry_context: measured to suppress whole files at long
+    # prompt lengths and to leak language across files. Enable only for
+    # contiguous same-language segments.
+    carry_context: false
+
+  # path B: native whisper speech translation to English
+  translate_whisper:
+    backend: openai
+    model_name: large-v3
+    task: translate
+    translator: whisper
+
+  # path C: turbo transcription + LLM translation of the sentence track
+  translate_llm:
+    backend: openai
+    model_name: large-v3-turbo
+    task: translate
+    translator: llm
+
+  # production: same weights as path A, CTranslate2 runtime
+  production:
+    backend: faster-whisper
+    model_name: large-v3-turbo
+    task: transcribe
+    compute_type: float16
+
+llm:
+  host: http://localhost:11434 # ml-004.eluvio
+  model: llama3.3:70b
+  # sentences per request; keeps the prompt well inside the context window and
+  # bounds how much output a single bad generation can corrupt
+  batch_size: 20
+  timeout: 300
