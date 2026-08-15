@@ -1,60 +1,85 @@
 # model-stt
 
-Whisper speech-to-text as an Eluvio tagger, implementing `common_ml.tagging.models.av.AVModel`.
+Multilingual speech-to-text as an Eluvio tagger, implementing
+`common_ml.tagging.models.av.AVModel`.
 
-## Paths
+**Transcription only**: faster-whisper (CTranslate2) running `large-v3-turbo`, which detects the
+spoken language per file and transcribes in that language. Translation is out of scope — see
+[restoring translation](#restoring-translation).
 
-| Path | Config | What it does |
+The three configurations that were evaluated, and why this one:
+
+| | Choice | Why |
 |---|---|---|
-| **A** | `profile=default` — `large-v3-turbo`, `task=transcribe` | Fast multilingual ASR. ~8x faster than `large-v3`, minimal WER cost. |
-| **B** | `profile=translate_whisper` — `large-v3`, `task=translate` | Whisper's native X→English speech translation. |
-| **C** | `profile=translate_llm` — `large-v3-turbo` + `translator=llm` | Turbo transcription, then LLM translation of the sentence track. Emits source **and** English. |
-| prod | `profile=production` — `faster-whisper`, `large-v3-turbo` | Path A on the CTranslate2 runtime. |
-
-**`large-v3-turbo` cannot translate.** It was distilled without the translation task and returns
-source-language text if asked to translate. A `task=translate` + `translator=whisper` request on turbo
-is **automatically upgraded** to `translate_fallback` (`large-v3`) with a warning — silently-wrong
-output is worse than a slower model. The model that actually ran is on `WhisperSTT.effective_model_name`
-and in each sentence tag's `additional_info["model"]`.
+| Model | `large-v3-turbo` | Within 0.25pp WER of `large-v3` on English, ahead on fr/ko, 2.6x faster, and more stable on real media (`large-v3` switched script mid-file and dropped punctuation). |
+| Backend | faster-whisper | Byte-identical text to openai-whisper on 116 clean FLEURS utterances, ~2.3x faster, no torch (~5.5 GB of wheels out of the image), and it is the only one that *has* a VAD to offer — kept as the `clean-audio` profile, though it is [off by default](#recall-and-hallucination-what-vad-costs). |
+| Translation | none shipped | Out of scope. When it was measured, transcribe-then-LLM beat whisper's native translation decisively (BLEU 42 vs 31 fr, 34.6 vs 9.8 ko, 32.1 vs 14.8 zh). |
 
 ## Output tracks
 
 | Track | Contents |
 |---|---|
-| `""` | Word-level tags. Source language (A, C) or English (B). |
-| `"auto_captions"` | Sentence-level tags, same language as the word track. |
-| `"translation"` | English sentence-level tags. Path C only. |
+| `""` | Word-level tags, one per word. |
+| `"auto_captions"` | Sentence-level tags. |
+
+Sentences are split on terminal punctuation (`. ? ! 。 ？ ！`, with abbreviation and initial
+exceptions so `"Mr. Anthony Eden"` stays one tag) or on a silence gap longer than
+`postprocessing.sentence_gap` (see `config.yml`). Whisper's own segments are decoder windows, not sentences, so the
+sentence track is rebuilt from word timings rather than used as-is.
+
+> **Known issue: captions are unbounded.** Those two are the *only* flush conditions, so if whisper
+> stops emitting terminal punctuation and the audio has no `sentence_gap`-long pause, a caption grows
+> without limit. Fast sports play-by-play hits this: `NBAallstar.mp4` produced a single **1595-word,
+> 608.8-second** caption whose largest inter-word gap was 3.4s, under the 5s backstop. Needs a third
+> flush condition — a maximum duration or word count, breaking at the largest gap in the accumulated
+> run so the split lands on a plausible boundary. Not yet implemented.
 
 Every tag carries `additional_info["language"]`, so a consumer never has to infer a track's language
 from the config that produced it. Timestamps are milliseconds relative to the file passed to `tag()`.
 
+Word tags also carry the decoder's own signals (`probability`, `avg_logprob`, `no_speech_prob`,
+`compression_ratio`, `temperature`); sentence tags carry `min_word_probability` and
+`mean_word_probability`, aggregated from the words the sentence was built from, so a caption can be
+weighed without joining back to the word track. The keys are **absent**, not null, when whisper
+returned no word timings, so "not measured" stays distinguishable from "measured and low". Read them
+as *lexical* confidence — a low minimum marks a word the model guessed at, typically a proper noun.
+They are **not** a hallucination score; see [recall and hallucination](#recall-and-hallucination-what-vad-costs).
+
 Word timings are always computed — the sentence track needs them to place its boundaries.
 `word_level: false` suppresses word *tags*, it does not disable word *timing*.
+
+## Restoring translation
+
+Everything is commented out rather than deleted. Search for `DISABLED (translation)` in
+[src/model.py](src/model.py), plus:
+
+- [config.yml](config.yml) — the `large-v3` model entry, `translate_fallback`, the
+  `translate_whisper` profile, and the `llm` section
+- [setup.py](setup.py) — move `ollama` from the `translate` extra back into `install_requires`
+- [run.py](run.py) — the `TranslatorConfig` import and the two constructor arguments
+- [src/translate.py](src/translate.py) — intact, just unused
+- `tests/test_model.py` — the path B/C tests were removed rather than commented (they no longer
+  compile against `RuntimeConfig`); they are in git history
+
+Path C also reintroduces a dependency the transcription-only image does not have: a reachable ollama
+host. When it was unreachable during testing, translation produced **no output and no error** —
+every sentence was dropped with only a log warning. Restoring path C should come with a loud failure
+when the whole file fails to translate.
 
 ## Weights
 
 Nothing is downloaded at container start. Populate the local cache once:
 
 ```bash
-python download_weights.py                                   # all 4 combinations, 9.4 GB
-python download_weights.py --models large-v3-turbo --backends ct2   # 1.62 GB
+python download_weights.py                              # what the image needs, 1.62 GB
+python download_weights.py --backends openai ct2        # adds the bench checkpoints
 ```
 
-| | openai-whisper | faster-whisper (CT2) |
-|---|---|---|
-| `large-v3-turbo` | 1.62 GB | 1.62 GB |
-| `large-v3` | 3.09 GB | 3.09 GB |
-
-Cache layout is `<weights_dir>/openai/*.pt` and `<weights_dir>/faster-whisper/<model>/`, defaulting to
-`~/.cache/model-stt/whisper`. `WEIGHTS_DIR` overrides it, which is how a baked image points at its
-in-image copy without a config edit.
-
-Two loading subtleties worth not rediscovering:
+Two loading subtleties:
 
 - **openai-whisper is loaded by *name*, not path.** `whisper.load_model()` only attaches DTW alignment
-  heads when handed a registered model name; handed a file path it sets `alignment_heads=None` and word
-  timestamps silently degrade. The staging directory travels separately as `download_root`, where
-  `_download()` sha256-checks the pre-staged file and skips the network.
+  heads when handed a registered model name (passing a file path sets `alignment_heads=None` and degrades word
+  timestamps). The staging directory travels separately as `download_root` (`_download()` sha256-checks the pre-staged file and skips the network).
 - **faster-whisper is loaded by explicit path or repo id, never a size name.** Size names resolve
   through a repo mapping that changes between library versions, so `large-v3-turbo` would not be
   reproducible across upgrades.
@@ -62,59 +87,70 @@ Two loading subtleties worth not rediscovering:
 ## Building
 
 ```bash
-WEIGHTS=turbo-ct2 ./build.sh     # production, CT2 only    (~1.6 GB weights, no torch)
-WEIGHTS=full-ct2  ./build.sh     # production + translation (~4.7 GB weights, no torch)
-WEIGHTS=all       ./build.sh     # benchmark, both backends (~9.4 GB weights, with torch)
+WEIGHTS=turbo-ct2 ./build.sh     # the shipped image (~1.6 GB weights, no torch)
 WEIGHTS=none      ./build.sh     # mount the cache at run time instead
 ```
 
-`WEIGHTS` also selects the pip extras: anything but `all` installs the CT2 backend only and skips the
-torch/nvidia wheel stack entirely, which is most of the image size.
-
-**If an image serves translation, `large-v3` must be in its baked set** — otherwise the automatic
-upgrade triggers a 3.09 GB download at load time, which fails outright offline. `full-ct2` covers this.
+`WEIGHTS` also selects the pip extras: anything but `all` installs the CT2 backend only. The `full-ct2` and `all` presets stage `large-v3` and/or the openai checkpoints for `bench/`; neither is needed by this image, and
+both require the corresponding `config.yml` entries to be uncommented first.
 
 ## Running
 
 ```bash
 # baked weights
-podman run --rm --network host --device nvidia.com/gpu=0 \
-  --volume=$(pwd)/test-files:/elv/test-files:ro --volume=$(pwd)/tags:/elv/tags \
-  model-whisper-stt --output-path /elv/tags/out.jsonl --params '{"profile":"production"}'
+podman run --rm --network host --device nvidia.com/gpu=3 \
+  --volume=$(pwd)/test-files:/elv/test-files:ro \
+  --volume=$(pwd)/tags:/elv/tags \
+  model-whisper-stt --output-path /elv/tags/out.jsonl
 
 # WEIGHTS=none, cache mounted
-podman run --rm --network host --device nvidia.com/gpu=0 \
+podman run --rm --network host --device nvidia.com/gpu=3 \
   --volume=$HOME/.cache/model-stt:/root/.cache/model-stt \
-  --volume=$(pwd)/test-files:/elv/test-files:ro --volume=$(pwd)/tags:/elv/tags \
+  --volume=$(pwd)/test-files:/elv/test-files:ro \
+  --volume=$(pwd)/tags:/elv/tags \
   model-whisper-stt --output-path /elv/tags/out.jsonl
 ```
 
 Input file paths arrive on stdin; `--params` takes any `RuntimeConfig` field, plus `profile` to pick a
 base profile from `config.yml`.
 
+Two profiles ship:
+
+| Profile | VAD | `condition_on_previous_text` | For |
+|---|---|---|---|
+| `default` | **off** | off | Everything by default. Decode all the audio and let the decoder's own guards filter. |
+| `clean-audio` | on, `threshold 0.25` / `speech_pad 2000ms` | on | Content with *distinguishable silence* — scripted film, studio recordings — where suppressing stock-phrase artifacts is worth more than recall. |
+
+The two fields in each profile are a pair, not independent knobs. With VAD off the decoder sees noise
+it used to be shielded from, and a *conditioned* decode locks onto a phrase and repeats it; turning
+conditioning off is what prevents that. Do not flip one without the other — there is a unit test
+guarding the coupling.
+
+VAD-off is the default because VAD fails *silently*: audio it discards never reaches the decoder, so
+over-filtering leaves no low-confidence segment and no repetition signal behind, only missing time.
+See [recall and hallucination](#recall-and-hallucination-what-vad-costs).
+
 ## Testing
 
 ```bash
-make test                              # 39 unit tests, no weights or GPU needed
-pytest -m weights tests/               # end-to-end against real weights
+make pytest                # 81 unit tests, no weights or GPU needed
+pytest -m weights tests/   # end-to-end against real weights
+make test                  # container end-to-end (buildscripts/testers/test-model.sh)
 ```
 
-Unit tests run against a `FakeBackend`, so track assignment, sentence grouping, the translation-model
-substitution, hallucination filtering and JSON recovery are all covered without a GPU.
+`make test` is the standard tagger-model container test from `buildscripts`. It transcribes every
+file **directly in** `test-files/` (subdirectories are excluded by its `-maxdepth 1`) and does
+`rm -rf test-output/` first.
+
+Unit tests run against a `FakeBackend`, so track assignment, sentence grouping, hallucination and
+degenerate-segment filtering, and the carried-context guards are all covered without a GPU.
 
 ## Measured behaviour
 
-Measured on 10 fixtures / 21.8 min of audio (en, fr, ko, zh, ta), `large-v3-turbo`, one L40S:
+Measured on 10 fixtures / 21.8 min of audio (English en, French fr, Korean ko, Chinese zh, Tamil ta) on one L40S. Paths B and C are no longer shipped.
 
-| | load | wall | RTF | peak GPU |
-|---|---|---|---|---|
-| openai-whisper | 9.1s | 83.2s | 15.7x | 5772 MiB |
-| faster-whisper | 1.8s | 36.9s | **35.4x** | 7894 MiB |
-
-faster-whisper is ~2.3x faster end to end and ~5x faster to load, for ~37% more GPU memory. Tag
-counts agree closely between the two (120/120, 87/87, 532/532, 62/62).
-
-All five systems over the same 10 fixtures (21.8 min, 5 languages):
+faster-whisper is ~2.3x faster end to end and ~5x faster to load than openai-whisper, and their tag
+counts agree closely (120/120, 87/87, 532/532, 62/62).
 
 | System | Path | Model | Load | Wall | RTF | peak GPU |
 |---|---|---|---|---|---|---|
@@ -124,20 +160,17 @@ All five systems over the same 10 fixtures (21.8 min, 5 languages):
 | `translate-llm` | C | turbo + llama3.3:70b | 0.4s | 347.5s | 3.8x | 12368 MiB |
 | `translate-openai` | B | large-v3 | 14.0s | 413.6s | 3.2x | 10248 MiB |
 
-Translation costs roughly **4.5x** the throughput of transcription (37.1x → 8.2x): `large-v3` is not
-turbo, and there is no turbo option for path B. Path C is slower still (6.1x, LLM round trip
-included) but is the only path that emits **both** the source-language transcript and the English
-translation — path B replaces the transcript with English. Path C also keeps the GPU footprint of
-turbo, moving the cost to the ollama host.
+Translation costs roughly **4.5x** the throughput of transcription (37.1x → 8.2x): 
+`large-v3` is not turbo, and there is no turbo option for path B. Path C is slower still (6.1x, LLM round trip included) but is the only path that emits **both** the source-language transcript and the English translation — path B replaces the transcript with English. 
+Path C also keeps the GPU footprint of turbo, moving the cost to the ollama host.
 
 Path C preserved every sentence in testing (3/3, 3/3, 17/17 translated, no drops) with spans
 identical between the source and translation tracks, since timestamps never reach the LLM.
 
 ### Quality (FLEURS)
 
-Scored with `bench/fetch_fleurs.py` + `bench/score.py` on the FLEURS test split (39 fr / 37 ko /
-40 zh utterances). FLEURS is n-way parallel, so the English transcript for a sentence id doubles as
-the X→English translation reference.
+Scored with `bench/fetch_fleurs.py` + `bench/score.py` on the FLEURS test split (39 fr / 37 ko / 40 zh utterances). 
+FLEURS is n-way parallel, so the English transcript for a sentence id doubles as the X→English translation reference.
 
 **Transcription — `large-v3-turbo`, both backends:**
 
@@ -146,10 +179,36 @@ the X→English translation reference.
 | openai-whisper | WER 6.46% / CER 2.64% | WER 13.53% / CER 3.77% | CER 9.44% |
 | faster-whisper | WER 6.46% / CER 2.64% | WER 13.53% / CER 3.77% | CER 9.44% |
 
-Not a copy-paste error: **116/116 utterances are byte-identical after normalization.** On short,
-clean audio at temperature 0 the two runtimes converge on the same tokens and differ only in timing
+Not a copy-paste error: **116/116 utterances are byte-identical after normalization.** On short clean audio at temperature 0, the two runtimes converge on the same tokens and differ only in timing
 metadata — so faster-whisper's ~2.3x speed win is free here. They *do* diverge on longer, messier
-material (216 vs 206 tags on a 162s song), so this is not a universal guarantee.
+material (216 vs 206 tags on a 162s song), so this is **not** a universal guarantee.
+
+**Measured with VAD off on both**, which is what the shipped configuration now is again. The
+equivalence does not survive noisy audio. On 600s of basketball crowd noise:
+
+| | segments | words | repeated segments |
+|---|---|---|---|
+| openai-whisper (no VAD exists) | 24 | 99 | 19 |
+| faster-whisper, vad off | 38 | 141 | **31** |
+| faster-whisper, vad on | 12 | 71 | **0** |
+
+> **Correction — read the last column with suspicion.** The NBAallstar slice used as the
+> "crowd noise" fixture is not crowd noise. Roughly the first 340s of `1200-1800s` is the All-Star
+> player introductions, transcribed accurately down to the spellings of Antetokounmpo and
+> Gilgeous-Alexander; only the last ~230s is genuine non-speech. A later sweep scored that whole
+> slice as hallucination, which made VAD look free and VAD-off look catastrophic — it is neither, and
+> the `vad on → 0` row is partly VAD suppressing **real speech**. The columns above were not
+> re-measured; treat "repeated segments" as an upper bound on hallucination and see
+> [recall and hallucination](#recall-and-hallucination-what-vad-costs) for the corrected picture.
+
+**Unfiltered, faster-whisper hallucinates more than openai-whisper here**, not
+less. The backend choice therefore rests on VAD being *available*, not on CT2 decoding better.
+openai-whisper has no VAD to turn on — it detects silence from the decoder's own `no_speech_prob`,
+which is exactly the signal that fails when the model is confident it heard speech in music or crowd
+noise. whisper's own source concedes the gap (`timing.py`: *"a better segmentation algorithm based
+on VAD should be able to replace this"*). With VAD on, CT2 scores en 4.21% / fr 6.82% WER against
+openai's 4.33% / 6.46% — comparable on clean speech. That argument still holds for keeping the option;
+it no longer holds for keeping it *on* by default.
 
 WER is reported as n/a for Chinese: the script has no whitespace word boundary, and FLEURS ships its
 Chinese references space-separated per character. Scoring naively gives ~100% WER and ~50% CER on a
@@ -165,22 +224,145 @@ Scored on the file intersection all three produced (fr 39, ko 33, zh 33):
 | B — whisper `large-v3`, CT2 | chrF2 59.75 / BLEU 31.31 | 29.31 / 9.80 | 43.36 / 14.84 |
 | **C — turbo + llama3.3:70b** | **66.16 / 42.05** | **58.55 / 34.63** | **59.17 / 32.12** |
 
-Path C wins on every language, scored on the identical file intersection. The margin scales with
-distance from English: +11 BLEU on French, +17 on Chinese, +26 on Korean. Whisper's translate task
-was trained on X→English data dominated by European languages, and it shows.
+Path C wins on every language, scored on the identical file intersection. 
+The margin scales with distance from English: +11 BLEU on French, +17 on Chinese, +26 on Korean. 
+Whisper's translate task was trained on X→English data dominated by European languages.
 
 Path C is also the only path with full coverage. Whisper's native translation silently produced **no
-output at all** for 2–7 of 40 files (fr 39/39, ko 34–35/37, zh 33–35/40); path C covered 39/39,
-37/37, 40/40. A translation path that drops 17% of Chinese files is a correctness problem, not a
-quality one.
+output at all** for 2–7 of 40 files (fr 39/39, ko 34–35/37, zh 33–35/40); path C covered 39/39, 37/37, 40/40. 
+A translation path that drops 17% of Chinese files is a correctness problem, not a quality one.
 
 The two backends are statistically indistinguishable on translation quality (differences are within
-noise), though they agree less exactly than on transcription — 26–35 of n utterances identical
-rather than all of them.
+noise), though they agree less exactly than on transcription — 26–35 of n utterances identical rather than all of them.
 
 Note openai-whisper warns `"Word-level timestamps on translations may not be reliable"` whenever
-`task=translate` runs with word timestamps. That affects path B's word track only; the sentence
-track takes its boundaries from punctuation.
+`task=translate` runs with word timestamps. That affects path B's word track only; 
+the sentence track takes its boundaries from punctuation.
+
+### Recall and hallucination: what VAD costs
+
+Measured on the seven `test-files/` fixtures — 13.2h of audio, 12.6h of it decodable
+(`NBAsummerleague33min.mp4` has no audio stream) — on one L40S. The full set runs in **7.8 minutes**
+at 102x realtime, 2556 MiB peak.
+
+The central finding is that **VAD-strictness and hallucination are not one axis you can tune.**
+Speech-over-loud-crowd (wants permissive VAD) and crowd-without-speech (wants aggressive VAD) are the
+same thing to Silero, and in `NBAallstar.mp4` they sit *minutes apart in the same file*. So no global
+threshold solves both:
+
+| | `NBAallstar` 50s–1884s | `spiderverse` four dropped stretches |
+|---|---|---|
+| VAD `thr 0.5 / pad 400` | 30.5 min dropped | 0 of 4 recovered |
+| VAD `thr 0.25 / pad 2000` | **30.5 min still dropped** | 4 of 4 recovered |
+| VAD off | recovered | recovered |
+
+That NBAallstar stretch is 30 minutes of arena PA announcements, not silence — decoded with VAD off
+it yields 130 captions, 67 of them six words or longer. Silero scores it as non-speech at every
+threshold tried. `model-asr` also emits into that window, but its output there is unusable
+(`'Ye.'`, `'My kee.'`, `'For your liver.'`), so it is not recovering the content either.
+
+**VAD off, over the whole fixture set:** +6.6% words (77,068 → 81,778), +460 substantive
+(≥6 word) captions, at a cost of **32** extra artifact-shaped captions — short texts sitting alone in
+a caption desert. Roughly 14:1 in favour of decoding everything. FLEURS is unchanged (en 4.33% /
+2.08%, fr 6.46% / 2.64%, ko 13.53% / 3.77%, zh CER 9.44%), and it is **faster** — 102x against 95x,
+because running Silero over a whole file costs more than decoding the parts it would discard.
+
+**`condition_on_previous_text: false` is the other half and is not optional.** With VAD off the
+decoder locks onto a phrase and repeats it. That loop is prompt feedback, not a silence artifact:
+
+| decode of `NBAallstar` 1680–1740s | output |
+|---|---|
+| conditioned | `'Thank you, Michael.'`, `'Thank you.'` |
+| unconditioned | `'Thank you, Michael.'`, `'The USA First World Tourna…'`, `'Voting will be over at the…'`, `'Now Mr. Chitton, stand up…'` |
+
+Turning conditioning off does not merely suppress the repeats, **it recovers the speech underneath
+them**. This is why there is no post-hoc repetition filter anywhere in this pipeline — see below.
+
+#### The isolated-artifact guard
+
+Whisper emits stock phrases over non-speech (`"Thank you."`) because they are frequent in its
+subtitle training data. `_drop_isolated_artifacts` removes them, using the one signal that separates
+them from real speech: **company**.
+
+> A short text (≤3 words) that **recurs** in a file (≥4 times) **and is characteristically isolated**
+> (median gap to nearest neighbour ≥10s) is that file's artifact. Only its isolated instances drop.
+
+Over `NBAallstar`, `"Thank you."` captions sat a median **18.9s** from their nearest neighbour (36 of
+55 more than 10s away), against **0.2s** for substantive captions (1588 of 1661 within 2s). Two orders
+of magnitude, so the threshold is not a knife-edge. Across 13.2h it fired 5 times and dropped 49
+segments; FLEURS moved `+0.00pp` on all seven metrics, since 10-second utterances never reach
+`min_count=4`.
+
+Both conditions are required, and it is deliberately **not** a list of known whisper phrases:
+
+- **Isolation alone** deleted 16 real short lines that legitimately stand alone between long musical
+  stretches — `'Whoa.'`, `'Hello.'`, `'Again, Moss?'`, `'One, two, three!'`, `'You want in?'`,
+  `'George, you wake?'` — each confirmed genuine by re-decoding its audio in isolation.
+- **A hardcoded phrase list** worked, but could only be assembled by reading this fixture set, and
+  would not transfer to another language where whisper has different stock phrases.
+- The self-calibrating rule was validated **leave-one-file-out**: the learned set stayed stable
+  (`{'thank you', 'oh my god'}`) whichever file was held out, and no validated-real caption was
+  dropped in any held-out file.
+
+Disable with `isolated_artifact_gap: 0`.
+
+#### Three things that do not work, with the evidence
+
+- **Per-segment confidence does not detect hallucination.** Whisper is *confidently* wrong over
+  noise. In the recovered NBAallstar window, `"Thank you."` words carry `no_speech_prob` **0.000**
+  (zero percent above the 0.6 threshold) and `avg_logprob` −0.69, against 0.000 / −0.45 for real
+  speech in the same file. `no_speech_threshold` cannot see these at all.
+- **Word probability does not either.** A "3+ consecutive words below p<0.6" rule flagged **2%** of a
+  100%-hallucinated sample against **9%** of clean Hollywood dialogue — anti-correlated. Read
+  `min_word_probability` as marking a *guessed word* (usually a proper noun), not a fabricated one.
+  In `"Hey, Mr. Sheldon, you're not crazy."` the name scored 0.50 between neighbours at 0.999, and no
+  two decodes of that audio produced the same name.
+- **Dropping runs of identical segments deletes real speech.** This is the obvious fix for looping
+  and it is wrong: the runs sit *on top of* real audio the conditioned decode failed to transcribe
+  (see the 1680–1740s table above). Fix the cause, do not delete the symptom. `src/model.py` carries a
+  comment recording this so it is not re-attempted.
+
+#### Straddled segments
+
+faster-whisper decodes the VAD-*concatenated* audio and maps timestamps back afterwards, resolving
+each word to a speech chunk **by its midpoint** (`restore_speech_timestamps`). A word whose alignment
+lands a frame either side of a chunk boundary resolves to the wrong chunk — and since a segment's
+span is taken from its first and last word, one misplaced word stretches the whole segment across the
+excision. `"Good luck, guys."` was emitted spanning **126.71s → 333.92s**; the phrase is really at
+333.06–333.90, and the audio at 126.7s is `"What the fuck? Who did that?"`.
+
+Worse, `to_sentences` then splits on the 207s gap, so the caption is not merely mistimed — it is torn
+into `"Good"` and `"luck, guys."`.
+
+`_repair_straddles` splits a segment's words into runs separated by more than `straddle_gap_max`,
+keeps the run holding the most *spoken time*, and packs the others back against it preserving each
+word's duration, clamped so they cannot overlap neighbouring segments. The example above repairs to
+333.30–333.94. Threshold justification: across **4096** genuine intra-segment word gaps measured with
+VAD off (where no excision is possible) over film, animation and sports, exactly **one** exceeded 2.0s.
+
+It fired 50 times across 13.2h. It bounds an unbounded error rather than guaranteeing correctness —
+the anchor is a majority heuristic, and it cannot repair *text* that whisper merged lossily, only the
+span.
+
+#### Output is not reproducible
+
+Same config, same process, three consecutive runs of the same file:
+
+```
+run0: words=634 captions=148
+run1: words=634 captions=148
+run2: words=627 captions=150   <- different
+```
+
+Whisper's temperature fallback re-decodes threshold-tripping segments with *sampling*, and with
+conditioning on, one changed segment shifts the prompt for everything after it.
+`ctranslate2.set_random_seed()` does **not** fix it — seeded runs still diverge, so float16 GPU
+reduction order is involved too.
+
+**There is a noise floor of roughly 1–2% on word counts.** Small run-to-run deltas mean nothing; do
+not read a ±few-hundred-word difference between two runs as a result. FLEURS numbers *are* stable,
+because clean short speech never trips the fallback. Anything below the noise floor needs a
+multi-run mean.
 
 ### Against the existing taggers
 
@@ -278,12 +460,12 @@ slowest and lowest-agreement file in the set. Check `large-v3` before shipping t
 ## Benchmarking
 
 ```bash
-python -m bench.run_bench --files test-files/*.m4a --systems turbo-openai turbo-ct2
+python -m bench.run_bench --files test-files/bench-files/*.m4a --systems turbo-openai turbo-ct2
 python -m bench.score --hyp bench-output/turbo-ct2.jsonl --ref refs/ --task asr
 ```
 
 `run_bench` reports real-time factor with model load timed separately, plus per-process GPU memory
-(via `nvidia-smi`, since `torch.cuda.max_memory_allocated` sees nothing for the CT2 backend).
+(via `nvidia-smi`, since `torch.cuda.max_memory_allocated` sees nothing for the CT2 backend). Need to uncomment paths B and C first to replicate experiments.
 
 `score` reads the common-ml `.jsonl` message format, so it scores `model-asr` and
 `model-multilingual-stt` output identically. Both sides are normalized with whisper's own

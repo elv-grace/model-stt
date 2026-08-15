@@ -40,6 +40,12 @@ class Segment:
     text: str
     avg_logprob: float
     no_speech_prob: float
+    # whisper's two repetition signals, carried through because they are the
+    # principled way to spot a hallucinated segment: compression_ratio above
+    # compression_ratio_threshold means the text is repetitive, and temperature
+    # above 0 means the decode fell back at least once before settling.
+    compression_ratio: float = 0.0
+    temperature: float = 0.0
     words: List[Word] = field(default_factory=list)
 
 
@@ -58,14 +64,62 @@ class DecodeOptions:
     # boundaries (without them we fall back to whisper's much coarser segment
     # boundaries). The benchmark flips this to measure what the DTW pass costs.
     word_timestamps: bool = True
-    condition_on_previous_text: bool = True
+    # off with vad_filter below; see RuntimeConfig.condition_on_previous_text
+    condition_on_previous_text: bool = False
     initial_prompt: Optional[str] = None
+    # None => greedy. Deliberate, not an oversight: faster-whisper defaults to 5,
+    # openai-whisper defaults to None and picks GreedyDecoder (decoding.py:546).
+    # Swept with VAD on, beam 1 vs 5 is within noise (en 4.21 vs 4.33, fr 6.82 vs
+    # 6.19 WER at n~38), so greedy wins on speed and keeps the two backends
+    # byte-identical. Without VAD, beam=5 was worse -- it finds *more* confident
+    # hallucinations in non-speech.
     beam_size: Optional[int] = None
     temperature: Sequence[float] = TEMPERATURE_FALLBACK
     compression_ratio_threshold: Optional[float] = 2.4
     logprob_threshold: Optional[float] = -1.0
     no_speech_threshold: Optional[float] = 0.6
     hallucination_silence_threshold: Optional[float] = 2.0
+
+    # Silero VAD. faster-whisper only; openai-whisper has no equivalent and
+    # ignores this. Off here and in RuntimeConfig -- see the reasoning there, and
+    # turn it on via the clean-audio profile.
+    #
+    # Two corrections to what earlier versions of this comment claimed, both worth
+    # keeping so they are not re-derived:
+    #
+    # 1. VAD is NOT conservative. vad_min_silence_ms only controls how long a pause
+    #    must run before VAD *closes* an already-open speech region; audio VAD
+    #    never opens in the first place is discarded whatever its length. On
+    #    spiderman-into-the-spiderverse-10min at threshold 0.5, four stretches
+    #    totalling 292s of real dialogue under a loud score never reached the
+    #    decoder.
+    # 2. The "600s of crowd noise" fixture this was tuned against was NOT crowd
+    #    noise. It is NBAallstar 1200-1800s, and roughly the first 340s of it is
+    #    the All-Star player introductions, transcribed accurately down to the
+    #    spellings of Antetokounmpo and Gilgeous-Alexander. An earlier sweep scored
+    #    those as hallucinations, which made VAD look free and VAD-off look
+    #    catastrophic. It is neither. Only the last ~230s is genuine non-speech.
+    #
+    # The sweep below is on spiderman-into-the-spiderverse-10min, whose four
+    # dropped stretches are known real dialogue, so "words" is a recall measure:
+    #
+    #   threshold  pad    kept   words   stretches recovered
+    #   0.50       400     184s    495    0 of 4        <- silero defaults
+    #   0.25       400     238s    585    2 of 4
+    #   0.15      1000     318s    652    3 of 4
+    #   0.25      2000     298s    625    4 of 4        <- clean-audio profile
+    #   off         --     591s    801    4 of 4        <- default
+    #
+    # 0.25/2000 is the best VAD-on operating point found: it recovers all four and
+    # 26% more words. Going below 0.25 buys little and costs decode stability
+    # (7-22 segments needing temperature fallback, against 0 at 0.25).
+    vad_filter: bool = False
+    vad_threshold: float = 0.25
+    vad_min_silence_ms: int = 2000
+    # Padding applied either side of every detected speech region. Doubles as the
+    # bridge that stops short excisions from splitting an utterance: regions less
+    # than 2*vad_speech_pad_ms apart merge, so no cut shorter than 4s survives.
+    vad_speech_pad_ms: int = 2000
 
 
 @dataclass(frozen=True)
@@ -121,8 +175,25 @@ class OpenAIWhisperBackend(WhisperBackend):
             weights.ref, device=device, download_root=weights.download_root
         )
         self.device = device
+        # transcribe() runs once per media file, so the vad_filter warning below
+        # is emitted once per model rather than once per file
+        self._warned_vad = False
 
     def transcribe(self, fpath: str, opts: DecodeOptions) -> Transcription:
+        if opts.vad_filter and not self._warned_vad:
+            # say so rather than ignoring it silently: bench uses the DecodeOptions
+            # defaults, so an openai run would request VAD, not get it, and be
+            # compared against a CT2 run that did -- without anyone noticing.
+            # Measured on 600s of crowd noise: openai 19 repeated segments, CT2
+            # unfiltered 31, CT2 with VAD 0. openai is the better *unfiltered*
+            # decoder here and still loses, because it has no VAD to enable.
+            logger.warning(
+                "openai-whisper has no VAD; vad_filter is ignored. It falls back to "
+                "the decoder's own no_speech_prob, which does not suppress "
+                "hallucinations over music or crowd noise."
+            )
+            self._warned_vad = True
+
         kwargs: Dict[str, Any] = dict(
             task=opts.task,
             language=opts.language,
@@ -150,6 +221,8 @@ class OpenAIWhisperBackend(WhisperBackend):
                 text=s["text"],
                 avg_logprob=s["avg_logprob"],
                 no_speech_prob=s["no_speech_prob"],
+                compression_ratio=s.get("compression_ratio", 0.0),
+                temperature=s.get("temperature", 0.0) or 0.0,
                 words=[
                     Word(
                         start=w["start"],
@@ -232,6 +305,15 @@ class FasterWhisperBackend(WhisperBackend):
             hallucination_silence_threshold=(
                 opts.hallucination_silence_threshold if opts.word_timestamps else None
             ),
+            vad_filter=opts.vad_filter,
+            vad_parameters=(
+                dict(
+                    threshold=opts.vad_threshold,
+                    min_silence_duration_ms=opts.vad_min_silence_ms,
+                    speech_pad_ms=opts.vad_speech_pad_ms,
+                )
+                if opts.vad_filter else None
+            ),
         )
 
         # transcribe() returns a generator; nothing is decoded until it is drained
@@ -242,6 +324,8 @@ class FasterWhisperBackend(WhisperBackend):
                 text=s.text,
                 avg_logprob=s.avg_logprob,
                 no_speech_prob=s.no_speech_prob,
+                compression_ratio=s.compression_ratio,
+                temperature=getattr(s, "temperature", 0.0) or 0.0,
                 words=[
                     Word(start=w.start, end=w.end, word=w.word, probability=w.probability)
                     for w in (s.words or [])

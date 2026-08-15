@@ -44,6 +44,8 @@ def segment(
     text: Optional[str] = None,
     avg_logprob: float = -0.2,
     no_speech_prob: float = 0.01,
+    compression_ratio: float = 1.0,
+    temperature: float = 0.0,
 ) -> Segment:
     return Segment(
         start=words[0].start,
@@ -51,6 +53,8 @@ def segment(
         text=text if text is not None else "".join(w.word for w in words),
         avg_logprob=avg_logprob,
         no_speech_prob=no_speech_prob,
+        compression_ratio=compression_ratio,
+        temperature=temperature,
         words=words,
     )
 
@@ -80,7 +84,6 @@ def make_model(monkeypatch, tmp_path):
             cfg or RuntimeConfig(),
             models=MODELS,
             weights_dir=str(tmp_path),
-            translate_fallback="large-v3",
             **kwargs,
         )
         model.backend = backend

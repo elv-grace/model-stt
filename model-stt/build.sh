@@ -2,16 +2,20 @@
 #
 # Build the model-stt container.
 #
-#   WEIGHTS=turbo-ct2 ./build.sh     production, CT2 transcribe only (~1.6 GB weights)
-#   WEIGHTS=full-ct2  ./build.sh     production with translation      (~4.7 GB weights)
-#   WEIGHTS=all       ./build.sh     benchmark, both backends         (~9.4 GB weights)
+#   WEIGHTS=turbo-ct2 ./build.sh     the shipped image: CT2 + turbo   (~1.6 GB weights)
 #   WEIGHTS=none      ./build.sh     no baked weights; mount the cache at run time
+#
+# full-ct2 and all additionally stage large-v3 and/or the openai checkpoints. They
+# exist for bench/ only -- neither is needed by the transcription-only image, and
+# both require the matching entries in config.yml to be uncommented.
 #
 # Weights are staged into the build context from the local cache populated by
 # download_weights.py -- podman COPY can only read from the build context, so they
 # have to be rsynced in rather than referenced in place.
 
 set -e
+
+git submodule update --init --recursive
 
 SCRIPT_PATH="$(dirname "$(realpath "$0")")"
 WEIGHTS="${WEIGHTS:-turbo-ct2}"
@@ -74,9 +78,12 @@ else
   BAKED_DIR="/elv/models/whisper"
 fi
 
-exec podman build --format docker \
-  -t "model-whisper-stt:${IMAGE_TAG}" \
+# build_container.bash forwards everything after its own flags to the container
+# build, so EXTRAS and WEIGHTS_DIR have to be passed here: without WEIGHTS_DIR the
+# Containerfile's empty default applies and the image looks for weights under
+# config.yml's ~/.cache path instead of the copy baked at /elv/models/whisper.
+exec buildscripts/build_container.bash \
+  -t "${IMAGE_NAME:-model-whisper-stt}:${IMAGE_TAG:-latest}" \
+  . -f Containerfile \
   --build-arg "EXTRAS=${EXTRAS}" \
-  --build-arg "WEIGHTS_DIR=${BAKED_DIR}" \
-  --network host \
-  -f Containerfile "$SCRIPT_PATH"
+  --build-arg "WEIGHTS_DIR=${BAKED_DIR}"

@@ -1,7 +1,12 @@
+# Transcription-only tagger: faster-whisper (CTranslate2) running large-v3-turbo.
+#
+# Translation is deliberately out of scope. Everything supporting it is commented
+# out rather than deleted; see "restoring translation" in README.md for the list.
+
 storage:
   # Weight cache, populated by download_weights.py. Layout:
-  #   <weights_dir>/openai/*.pt
   #   <weights_dir>/faster-whisper/<model>/
+  #   <weights_dir>/openai/*.pt          (bench only, never shipped in the image)
   # Images built with WEIGHTS != none bake these in and set WEIGHTS_DIR to point
   # at the baked copy; images built with WEIGHTS=none expect this path to be
   # mounted from the host instead.
@@ -11,32 +16,36 @@ device: cuda
 
 # Logical model name -> where each backend finds its weights.
 #
-# openai:   file name under <weights_dir>/openai. This MUST stay whisper's canonical
-#           file name: whisper.load_model() only resolves DTW alignment heads when it
-#           is given a registered model *name*, so we pass the name plus a
-#           download_root and let it find the pre-staged file. Loading by path
-#           silently disables alignment heads and wrecks word timestamps.
-# ct2:      directory under <weights_dir>/faster-whisper, or ct2_repo if absent.
+# ct2:      directory under <weights_dir>/faster-whisper, else ct2_repo. Always an
+#           explicit directory or repo id, never a bare size name: faster-whisper's
+#           size-name -> repo mapping changes between library versions.
+# openai:   file name under <weights_dir>/openai. Used only by the openai backend,
+#           which the image does not install (setup.py extras). Must stay whisper's
+#           canonical file name -- load_model() only resolves DTW alignment heads
+#           when given a registered model *name*, not a path.
 # translate: whether the weights support whisper's native X->en speech translation.
-#           large-v3-turbo was distilled without the translation task and returns
-#           source-language text, so it is false there.
 models:
   large-v3-turbo:
     openai: large-v3-turbo.pt
     ct2: large-v3-turbo
     ct2_repo: deepdml/faster-whisper-large-v3-turbo-ct2
     translate: false
-  large-v3:
-    openai: large-v3.pt
-    ct2: large-v3
-    ct2_repo: Systran/faster-whisper-large-v3
-    translate: true
 
-# Substituted in when task=translate + translator=whisper is requested with weights
-# that were not trained for translation (i.e. large-v3-turbo). Must name a model
-# above with translate: true, and that model's weights must be in the image's
-# baked set -- otherwise the substitution triggers a multi-GB download at startup.
-translate_fallback: large-v3
+  # DISABLED -- not shipped. large-v3 exists only for whisper's native translation
+  # (path B), which measured far worse than transcribe-then-LLM: BLEU 31 vs 42
+  # (fr), 9.8 vs 34.6 (ko), 14.8 vs 32.1 (zh), while also silently dropping whole
+  # files. For transcription it is 2.6x slower than turbo with no reliable gain,
+  # and on real media it was less stable (mid-file script switching, lost
+  # punctuation). Uncomment to reproduce the bench comparisons.
+  # large-v3:
+  #   openai: large-v3.pt
+  #   ct2: large-v3
+  #   ct2_repo: Systran/faster-whisper-large-v3
+  #   translate: true
+
+# DISABLED with path B -- the model substituted in when translation was requested
+# with weights that cannot translate.
+# translate_fallback: large-v3
 
 postprocessing:
   # words more than this far apart (ms) are never merged into one sentence
@@ -44,12 +53,10 @@ postprocessing:
 
 runtime:
   default:
-    # path A: fast multilingual transcription
-    backend: openai
+    backend: faster-whisper
     model_name: large-v3-turbo
-    task: transcribe
-    translator: whisper
-    language: null
+    compute_type: float16
+    language: null          # null => detect per file
     word_level: true
     sentence_level: true
     # see RuntimeConfig.carry_context: measured to suppress whole files at long
@@ -57,31 +64,58 @@ runtime:
     # contiguous same-language segments.
     carry_context: false
 
-  # path B: native whisper speech translation to English
-  translate_whisper:
-    backend: openai
-    model_name: large-v3
-    task: translate
-    translator: whisper
+    # Decode everything; let the decoder's own guards do the filtering.
+    #
+    # VAD is off by default because it is the binding constraint on real media,
+    # and it fails *silently*: audio it discards never reaches the decoder, so
+    # over-filtering leaves no low-confidence segment and no repetition signal
+    # behind, only missing time. Measured over 13.2h of fixtures, turning it off
+    # returned 6.6% more words, recovered 30 minutes of arena PA announcements
+    # that Silero scored as non-speech at threshold 0.5 *and* 0.25 alike, and cost
+    # 32 extra artifact-shaped captions against 460 extra substantive ones.
+    #
+    # condition_on_previous_text is the other half and is not optional here. With
+    # VAD off the decoder sees noise it was previously shielded from, and a
+    # conditioned decode locks onto a phrase and repeats it. That looping is prompt
+    # feedback, not a silence artifact: over NBAallstar 1680-1740s a conditioned
+    # decode returned "Thank you." on repeat, while the same audio decoded
+    # unconditioned returned the real "The USA First World Tournament... Voting
+    # will be over at the...". Turning conditioning off does not merely suppress
+    # the repeats, it recovers the speech underneath them -- which is why there is
+    # no post-hoc repetition filter anywhere in this pipeline. Dropping the
+    # repeated segments would have deleted that content instead of restoring it.
+    #
+    # Also faster: running Silero over a whole file costs more than decoding the
+    # parts it would have discarded (102x realtime against 95x).
+    vad_filter: false
+    condition_on_previous_text: false
+    # only consulted when a profile turns vad_filter back on
+    vad_threshold: 0.25
+    vad_min_silence_ms: 2000
+    vad_speech_pad_ms: 2000
 
-  # path C: turbo transcription + LLM translation of the sentence track
-  translate_llm:
-    backend: openai
-    model_name: large-v3-turbo
-    task: translate
-    translator: llm
+  # VAD on, for content with distinguishable silence: scripted film and TV, studio
+  # recordings, anything where speech is separated by real quiet rather than by a
+  # score or a crowd. Suppresses the stock-phrase artifacts whisper emits over
+  # non-speech, at the cost of dropping speech mixed into continuous noise.
+  #
+  # Not Silero's own defaults (0.5 / 2000 / 400). At threshold 0.5 the filter drops
+  # dialogue mixed under a loud score -- 292s of it on a 10-minute animated feature
+  # -- and speech_pad_ms doubles as the bridge that stops a short excision from
+  # splitting an utterance, since regions less than 2*pad apart merge. Raise the
+  # threshold towards 0.5 only for sparse speech over steady noise.
+  clean-audio:
+    vad_filter: true
+    vad_threshold: 0.25
+    vad_min_silence_ms: 2000
+    vad_speech_pad_ms: 2000
+    condition_on_previous_text: true
 
-  # production: same weights as path A, CTranslate2 runtime
-  production:
-    backend: faster-whisper
-    model_name: large-v3-turbo
-    task: transcribe
-    compute_type: float16
-
-llm:
-  host: http://localhost:11434 # ml-004.eluvio
-  model: llama3.3:70b
-  # sentences per request; keeps the prompt well inside the context window and
-  # bounds how much output a single bad generation can corrupt
-  batch_size: 20
-  timeout: 300
+# DISABLED -- ollama endpoint for path C (transcribe, then translate the sentence
+# track with an LLM). Removing translation also removes this external dependency:
+# with path C active, an unreachable host means no translation output at all.
+# llm:
+#   host: http://localhost:11434
+#   model: llama3.3:70b
+#   batch_size: 20
+#   timeout: 300

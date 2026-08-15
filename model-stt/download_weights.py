@@ -53,7 +53,9 @@ def main() -> int:
     parser.add_argument('--dest', default=config["storage"]["weights_dir"],
                         help='weight cache root (default: storage.weights_dir)')
     parser.add_argument('--models', nargs='+', default=sorted(models), choices=sorted(models))
-    parser.add_argument('--backends', nargs='+', default=['openai', 'ct2'],
+    # ct2 only by default: the image ships the CTranslate2 backend, and the openai
+    # checkpoints are needed only to reproduce bench comparisons
+    parser.add_argument('--backends', nargs='+', default=['ct2'],
                         choices=['openai', 'ct2'])
     args = parser.parse_args()
 

@@ -1,7 +1,29 @@
 test-files/
-test_output/*
+test-output/
+test-output-default-filtered/
+test-output-new/
+test-output-twostage/
+test-output-twostage-filtered/
+# weights staged into the build context by build.sh (up to 9.4 GB)
+models/
+# runtime caches mounted into the container by the tester
+.cache/
+.asr-cache/
+# bench artifacts
+bench-output/
+bench-fleurs/
+bench-asr/
+bench-pathc/
+bench-translate/
+bench-fleurs-filtered/
+bench-fleurs-new/
+bench-fleurs-twostage/
+bench-output-new/
+bench-output-oldvad/
+bench-output-twostage/
+# dataset
 fleurs/
+# extra
 *.egg-info
 __pycache__
 .pytest_cache/
-.asr-cache/

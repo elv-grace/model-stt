@@ -6,15 +6,17 @@ from common_ml.utils import nested_update
 
 from config import config
 from src.model import RuntimeConfig, WhisperSTT
-from src.translate import TranslatorConfig
+
+# DISABLED (translation): path C's translator config
+# from src.translate import TranslatorConfig
 
 if __name__ == '__main__':
     setproctitle.setproctitle('model-whisper-stt')
     catch_errors()
 
     # user params override the default runtime profile; named profiles in
-    # config.yml (translate_whisper, translate_llm, production) can be selected
-    # with {"profile": "..."} and then further overridden field by field
+    # config.yml can be selected with {"profile": "..."} and then further
+    # overridden field by field
     params = get_params()
     profile = params.pop("profile", "default")
     defaults = config["runtime"].get(profile)
@@ -30,8 +32,7 @@ if __name__ == '__main__':
         models=config["models"],
         weights_dir=config["storage"]["weights_dir"],
         sentence_gap_ms=config["postprocessing"]["sentence_gap"],
-        translate_fallback=config.get("translate_fallback"),
-        translator_cfg=from_dict(TranslatorConfig, config["llm"]),
+        # DISABLED (translation): translate_fallback / translator_cfg
     )
 
     run_default(model)

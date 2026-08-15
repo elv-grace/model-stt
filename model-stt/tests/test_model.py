@@ -5,7 +5,6 @@ from src.backends import Transcription
 from src.model import (
     CONTEXT_CHARS,
     SENTENCE_TRACK,
-    TRANSLATION_TRACK,
     WORD_TRACK,
     RuntimeConfig,
     WhisperSTT,
@@ -136,8 +135,7 @@ def test_prompted_decode_that_returns_nothing_is_retried_without_the_prompt(
     monkeypatch.setattr("src.model.build_backend", lambda **_: backend)
     monkeypatch.setattr("src.model.has_audio_stream", lambda _: True)
     model = WhisperSTT(
-        RuntimeConfig(carry_context=True), models=MODELS,
-        weights_dir="/tmp", translate_fallback="large-v3",
+        RuntimeConfig(carry_context=True), models=MODELS, weights_dir="/tmp",
     )
 
     model.tag(FILE)          # no prompt yet, primes _prev_tail
@@ -169,8 +167,7 @@ def test_language_change_discards_the_carried_prompt(monkeypatch, hello_world):
     monkeypatch.setattr("src.model.build_backend", lambda **_: backend)
     monkeypatch.setattr("src.model.has_audio_stream", lambda _: True)
     model = WhisperSTT(
-        RuntimeConfig(carry_context=True), models=MODELS,
-        weights_dir="/tmp", translate_fallback="large-v3",
+        RuntimeConfig(carry_context=True), models=MODELS, weights_dir="/tmp",
     )
 
     model.tag(FILE)                        # english, primes the tail
@@ -211,80 +208,10 @@ def test_file_without_audio_is_skipped(make_model, hello_world, monkeypatch):
     assert model.tag("test-files/silent.mp4") == []
 
 
-# --- path selection -------------------------------------------------------
-
-
-def test_path_a_transcribes_with_turbo(make_model, hello_world):
-    model = make_model(hello_world, RuntimeConfig(model_name="large-v3-turbo"))
-    model.tag(FILE)
-
-    assert model.effective_model_name == "large-v3-turbo"
-    assert model.backend.calls[0].task == "transcribe"
-
-
-def test_path_b_uses_whisper_translation_and_labels_output_english(make_model):
-    french = Transcription(
-        language="fr", segments=[segment([word(" Good", 0.0, 0.5), word(" morning.", 0.5, 1.0)])]
-    )
-    cfg = RuntimeConfig(model_name="large-v3", task="translate", translator="whisper")
-    model = make_model(french, cfg)
-    tags = model.tag(FILE)
-
-    assert model.backend.calls[0].task == "translate"
-    # whisper's translate task emits English regardless of the detected language
-    assert all(t.additional_info["language"] == "en" for t in tags)
-    assert tracks(tags, TRANSLATION_TRACK) == []
-
-
-def test_turbo_translation_request_is_upgraded_not_served(make_model, hello_world, caplog):
-    # turbo accepts task="translate" and returns untranslated source-language
-    # text, so the request must be substituted rather than honoured
-    cfg = RuntimeConfig(model_name="large-v3-turbo", task="translate", translator="whisper")
-    model = make_model(hello_world, cfg)
-
-    assert model.effective_model_name == "large-v3"
-
-
-def test_translation_without_a_usable_fallback_raises(monkeypatch, tmp_path, hello_world):
-    monkeypatch.setattr("src.model.build_backend", lambda **_: None)
-    cfg = RuntimeConfig(model_name="large-v3-turbo", task="translate", translator="whisper")
-
-    with pytest.raises(ValueError, match="translate_fallback"):
-        WhisperSTT(cfg, models=MODELS, weights_dir=str(tmp_path), translate_fallback=None)
-
-
-def test_path_c_transcribes_in_source_language_and_adds_translation_track(
-    make_model, monkeypatch
-):
-    class StubTranslator:
-        def __init__(self, *_, **__):
-            pass
-
-        def translate(self, sentences, source_language):
-            assert source_language == "fr"
-            return [s.__class__(start=s.start, end=s.end, text="Good morning.") for s in sentences]
-
-    monkeypatch.setattr("src.model.LLMTranslator", StubTranslator)
-
-    french = Transcription(
-        language="fr", segments=[segment([word(" Bonjour", 0.0, 0.5), word(" matin.", 0.5, 1.0)])]
-    )
-    cfg = RuntimeConfig(model_name="large-v3-turbo", task="translate", translator="llm")
-    model = make_model(french, cfg)
-    tags = model.tag(FILE)
-
-    # path C keeps turbo and does not use whisper's translate task
-    assert model.effective_model_name == "large-v3-turbo"
-    assert model.backend.calls[0].task == "transcribe"
-
-    assert [t.tag for t in tracks(tags, SENTENCE_TRACK)] == ["Bonjour matin."]
-    assert tracks(tags, SENTENCE_TRACK)[0].additional_info["language"] == "fr"
-
-    translated = tracks(tags, TRANSLATION_TRACK)
-    assert [t.tag for t in translated] == ["Good morning."]
-    assert translated[0].additional_info["language"] == "en"
-    # the span comes from whisper's alignment, not from the translator
-    assert (translated[0].start_time, translated[0].end_time) == (0, 1000)
+# DISABLED (translation): tests for path B (whisper native translation), path C
+# (turbo + LLM), and the turbo-cannot-translate auto-upgrade lived here. They are
+# removed with the task/translator fields rather than commented, since they no
+# longer compile against RuntimeConfig; git history has them.
 
 
 # --- config validation ----------------------------------------------------
@@ -293,8 +220,6 @@ def test_path_c_transcribes_in_source_language_and_adds_translation_track(
 @pytest.mark.parametrize(
     "cfg",
     [
-        RuntimeConfig(task="summarize"),
-        RuntimeConfig(translator="deepl"),
         RuntimeConfig(backend="onnx"),
         RuntimeConfig(model_name="tiny"),
     ],
@@ -302,4 +227,220 @@ def test_path_c_transcribes_in_source_language_and_adds_translation_track(
 def test_invalid_config_rejected(cfg, tmp_path, monkeypatch):
     monkeypatch.setattr("src.model.build_backend", lambda **_: None)
     with pytest.raises(ValueError):
-        WhisperSTT(cfg, models=MODELS, weights_dir=str(tmp_path), translate_fallback="large-v3")
+        WhisperSTT(cfg, models=MODELS, weights_dir=str(tmp_path))
+
+
+def test_unique_short_fragment_is_kept_with_repaired_span(make_model):
+    """Measured on real media: of 13 sub-100ms fragments, some were verbatim
+    repeats but others ('Right?', 'Good.') were genuine short interjections whose
+    alignment collapsed. Dropping those loses transcribed content."""
+    real = segment([word(" Forbes had a good breakup.", 10.0, 12.0)])
+    fragment = segment([word(" Right?", 12.5, 12.52)])   # 20ms, unrelated text
+    tags = make_model(Transcription(language="en", segments=[real, fragment])).tag(FILE)
+
+    captions = [t.tag for t in tracks(tags, SENTENCE_TRACK)]
+    assert "Right?" in " ".join(captions)
+    frag_words = [t for t in tracks(tags, WORD_TRACK) if t.tag == "Right?"]
+    assert frag_words, "fragment text must survive"
+    # its span is repaired to something physically plausible
+    assert frag_words[0].end_time - frag_words[0].start_time >= 50
+
+
+def test_near_repeat_fragment_is_still_dropped(make_model):
+    """whisper's end-of-audio artifact often drops a leading word, so exact
+    equality misses it."""
+    real = segment([word(" But the prince didn't answer.", 79.0, 82.0)])
+    repeat = segment([word(" The prince didn't answer.", 82.0, 82.02)])
+    tags = make_model(Transcription(language="en", segments=[real, repeat])).tag(FILE)
+
+    assert [t.tag for t in tracks(tags, SENTENCE_TRACK)] == ["But the prince didn't answer."]
+
+
+def test_repetitive_segment_dropped_only_after_failed_fallback(make_model):
+    # fell back and still repetitive -> looping, drop
+    looped = segment([word(" Thank you.", 1.0, 2.0)], compression_ratio=3.1, temperature=0.6)
+    # repetitive text but a clean first-pass decode -> legitimate, keep
+    clean = segment([word(" Thank you.", 3.0, 4.0)], compression_ratio=3.1, temperature=0.0)
+
+    dropped = make_model(Transcription(language="en", segments=[looped])).tag(FILE)
+    kept = make_model(Transcription(language="en", segments=[clean])).tag(FILE)
+
+    assert tracks(dropped, SENTENCE_TRACK) == []
+    assert [t.tag for t in tracks(kept, SENTENCE_TRACK)] == ["Thank you."]
+
+
+def test_repetition_signals_reach_additional_info(make_model):
+    seg = segment([word(" Hello.", 0.0, 1.0)], compression_ratio=1.4, temperature=0.2)
+    tags = make_model(Transcription(language="en", segments=[seg])).tag(FILE)
+
+    info = tracks(tags, WORD_TRACK)[0].additional_info
+    assert info["compression_ratio"] == 1.4
+    assert info["temperature"] == 0.2
+
+
+def test_segment_straddling_a_vad_cut_is_pulled_back_together(make_model):
+    """The real 'Good luck, guys.' case: restore_speech_timestamps resolved the
+    first word to the chunk before a 207s excision and the rest to the chunk
+    after, stretching one 3-word segment across the whole cut."""
+    straddled = segment([
+        word(" Good", 126.71, 126.95),
+        word(" luck,", 333.54, 333.66),
+        word(" guys.", 333.70, 333.92),
+    ])
+    tags = make_model(Transcription(language="en", segments=[straddled])).tag(FILE)
+
+    sentences = tracks(tags, SENTENCE_TRACK)
+    # unrepaired, to_sentences() splits on the 207s gap into "Good" / "luck, guys."
+    assert [t.tag for t in sentences] == ["Good luck, guys."]
+    # the run holding the most spoken time wins, so the phrase lands at ~333s;
+    # decoding the same audio unfiltered puts it at 333.06-333.90
+    assert 333_000 <= sentences[0].start_time <= 333_500
+    assert sentences[0].end_time == 333_920
+
+
+def test_straddle_repair_leaves_ordinary_pauses_alone(make_model):
+    """A pause shorter than straddle_gap_max is real speech timing, not an
+    excision, and must survive untouched."""
+    seg = segment([word(" Wait", 1.0, 1.4), word(" for", 3.2, 3.4), word(" it.", 3.4, 3.8)])
+    tags = make_model(Transcription(language="en", segments=[seg])).tag(FILE)
+
+    assert [(t.start_time, t.end_time) for t in tracks(tags, WORD_TRACK)] == [
+        (1000, 1400), (3200, 3400), (3400, 3800)
+    ]
+
+
+def test_repaired_straddle_does_not_overlap_its_neighbours(make_model):
+    """Packing the misplaced run back against the anchor must stop at the
+    neighbouring segments, which keep their own timings."""
+    before = segment([word(" Who did that?", 124.5, 126.4)])
+    straddled = segment([word(" Good", 126.7, 126.95), word(" luck.", 127.2, 127.4)])
+    after = segment([word(" See you.", 127.5, 128.0)])
+    cfg = RuntimeConfig(straddle_gap_max=0.2)  # force both runs to be split
+    tags = make_model(
+        Transcription(language="en", segments=[before, straddled, after]), cfg=cfg
+    ).tag(FILE)
+
+    words = tracks(tags, WORD_TRACK)
+    assert all(a.end_time <= b.start_time for a, b in zip(words, words[1:]))
+
+
+def test_vad_tuning_reaches_the_backend(make_model, hello_world):
+    cfg = RuntimeConfig(vad_threshold=0.4, vad_min_silence_ms=1500, vad_speech_pad_ms=900)
+    model = make_model(hello_world, cfg=cfg)
+    model.tag(FILE)
+
+    opts = model.backend.calls[0]
+    assert (opts.vad_threshold, opts.vad_min_silence_ms, opts.vad_speech_pad_ms) == (
+        0.4, 1500, 900
+    )
+
+
+def test_sentence_tags_carry_word_probability_aggregates(make_model):
+    """So a consumer can weigh a caption without joining to the word track."""
+    seg = segment([
+        word(" Hey,", 0.0, 0.2, probability=0.3435),
+        word(" Mr.", 0.4, 0.6, probability=0.5352),
+        word(" Sheldon,", 0.7, 1.1, probability=0.4955),
+        word(" you're", 1.2, 1.3, probability=0.9993),
+        word(" not", 1.3, 1.5, probability=0.9985),
+        word(" crazy.", 1.5, 1.9, probability=0.999),
+    ])
+    tags = make_model(Transcription(language="en", segments=[seg])).tag(FILE)
+
+    info = tracks(tags, SENTENCE_TRACK)[0].additional_info
+    assert info["min_word_probability"] == 0.3435
+    assert info["mean_word_probability"] == 0.7285
+
+
+def test_probability_aggregates_omitted_when_there_are_no_word_timings(make_model):
+    """The segment-level fallback has nothing to aggregate; the keys are absent
+    rather than null so 'not measured' is distinguishable from 'measured low'."""
+    from src.backends import Segment
+
+    seg = Segment(start=0.0, end=1.0, text=" Hello.", avg_logprob=-0.2,
+                  no_speech_prob=0.01, words=[])
+    tags = make_model(Transcription(language="en", segments=[seg])).tag(FILE)
+
+    info = tracks(tags, SENTENCE_TRACK)[0].additional_info
+    assert "min_word_probability" not in info
+    assert info["language"] == "en"
+
+
+def _spread(texts, gap, start=0.0, dur=0.6):
+    """Segments laid out with `gap` seconds of silence between them."""
+    segs, t = [], start
+    for text in texts:
+        segs.append(segment([word(f" {text}", t, t + dur)]))
+        t += dur + gap
+    return segs
+
+
+def test_isolated_recurring_artifact_is_dropped(make_model):
+    """Whisper's stock non-speech phrase: recurs, and always stands alone."""
+    segs = _spread(["Thank you."] * 5, gap=40.0)
+    tags = make_model(Transcription(language="en", segments=segs)).tag(FILE)
+
+    assert tracks(tags, SENTENCE_TRACK) == []
+    assert tracks(tags, WORD_TRACK) == []  # word track drops with it
+
+
+def test_conversational_phrase_is_kept_however_often_it_recurs(make_model):
+    """The median-isolation test is what protects real dialogue: 'Thank you.'
+    said inside a conversation has neighbours, so it is never an artifact."""
+    segs = _spread(["Thank you."] * 5, gap=0.5)
+    tags = make_model(Transcription(language="en", segments=segs)).tag(FILE)
+
+    assert len(tracks(tags, SENTENCE_TRACK)) == 5
+
+
+def test_one_off_isolated_line_is_kept(make_model):
+    """A short real line can legitimately sit alone between long musical
+    stretches -- 'Whoa.', 'Hello.' -- so recurrence is required too."""
+    segs = _spread(["Whoa.", "Hello.", "Again, Moss?", "One, two, three!"], gap=40.0)
+    tags = make_model(Transcription(language="en", segments=segs)).tag(FILE)
+
+    assert len(tracks(tags, SENTENCE_TRACK)) == 4
+
+
+def test_only_the_isolated_occurrences_are_dropped(make_model):
+    """A phrase that is an artifact in this file may still be spoken for real in
+    one place; the instance with company survives."""
+    segs = _spread(["Thank you."] * 4, gap=40.0)
+    real = segment([word(" Thank you.", 400.0, 400.6)])
+    neighbour = segment([word(" You're welcome.", 401.0, 402.0)])
+    tags = make_model(
+        Transcription(language="en", segments=segs + [real, neighbour])
+    ).tag(FILE)
+
+    assert [t.tag for t in tracks(tags, SENTENCE_TRACK)] == ["Thank you.", "You're welcome."]
+
+
+def test_isolated_artifact_guard_can_be_disabled(make_model):
+    cfg = RuntimeConfig(isolated_artifact_gap=0.0)
+    segs = _spread(["Thank you."] * 5, gap=40.0)
+    tags = make_model(Transcription(language="en", segments=segs), cfg=cfg).tag(FILE)
+
+    assert len(tracks(tags, SENTENCE_TRACK)) == 5
+
+
+def test_long_isolated_segment_is_never_an_artifact(make_model):
+    """Only short texts are candidates; a full sentence standing alone is
+    normal in sparse-dialogue content."""
+    segs = _spread(["I am here to talk about the first organization."] * 5, gap=40.0)
+    tags = make_model(Transcription(language="en", segments=segs)).tag(FILE)
+
+    assert len(tracks(tags, SENTENCE_TRACK)) == 5
+
+
+def test_shipped_defaults_decode_everything_unconditioned(make_model, hello_world):
+    """VAD off and conditioning off are a pair, not two independent choices: with
+    VAD off the decoder sees noise it was shielded from, and conditioning is what
+    turns that into a repeat loop. Guard the coupling so neither drifts alone."""
+    cfg = RuntimeConfig()
+    assert (cfg.vad_filter, cfg.condition_on_previous_text) == (False, False)
+
+    model = make_model(hello_world, cfg=cfg)
+    model.tag(FILE)
+    opts = model.backend.calls[0]
+    assert opts.vad_filter is False
+    assert opts.condition_on_previous_text is False

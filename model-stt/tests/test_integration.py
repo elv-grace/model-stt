@@ -22,9 +22,11 @@ WEIGHTS_DIR = config["storage"]["weights_dir"]
 MODELS = config["models"]
 
 # any short speech file; model-asr's fixtures are 30s AAC segments
+_HERE = os.path.dirname(__file__)
 CANDIDATES = sorted(
-    glob.glob(os.path.join(os.path.dirname(__file__), "..", "test-files", "*.m4a"))
-    + glob.glob(os.path.join(os.path.dirname(__file__), "..", "..", "model-asr", "test-files", "*.m4a"))
+    glob.glob(os.path.join(_HERE, "..", "test-files", "bench-files", "*.m4a"))
+    + glob.glob(os.path.join(_HERE, "..", "test-files", "*.m4a"))
+    + glob.glob(os.path.join(_HERE, "..", "..", "model-asr", "test-files", "*.m4a"))
 )
 
 
@@ -48,7 +50,6 @@ def test_transcribes_with_either_backend(backend, media):
         RuntimeConfig(backend=backend, model_name="large-v3-turbo"),
         models=MODELS,
         weights_dir=WEIGHTS_DIR,
-        translate_fallback=config.get("translate_fallback"),
     )
     tags = model.tag(media)
 
@@ -84,8 +85,7 @@ def test_both_backends_agree_on_transcript(media):
             RuntimeConfig(backend=backend, model_name="large-v3-turbo"),
             models=MODELS,
             weights_dir=WEIGHTS_DIR,
-            translate_fallback=config.get("translate_fallback"),
-        )
+            )
         tags = [t for t in model.tag(media) if t.track == WORD_TRACK]
         texts[backend] = [t.tag.lower().strip(".,!?") for t in tags]
 
@@ -108,7 +108,6 @@ def test_timestamps_stay_within_the_file(media):
         RuntimeConfig(backend="faster-whisper", model_name="large-v3-turbo"),
         models=MODELS,
         weights_dir=WEIGHTS_DIR,
-        translate_fallback=config.get("translate_fallback"),
     )
     tags = model.tag(media)
 

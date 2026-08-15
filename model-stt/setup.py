@@ -1,13 +1,7 @@
 from setuptools import setup
 
-# openai-whisper needs torch; faster-whisper (CTranslate2) does not. Keeping them
-# as extras lets a production image install only the CT2 runtime and skip the
-# multi-GB torch/nvidia wheel stack entirely.
-OPENAI_BACKEND = [
-    'openai-whisper==20250625',
-    'torch',
-]
-
+# The container installs the ct2 extra only: faster-whisper (CTranslate2) needs no
+# torch, which keeps the multi-GB torch/nvidia wheel stack out of the image.
 CT2_BACKEND = [
     'faster-whisper>=1.1.0',
     # ctranslate2 links cuBLAS/cuDNN from these wheels rather than a system CUDA
@@ -16,9 +10,24 @@ CT2_BACKEND = [
     'nvidia-cudnn-cu12>=9,<10',
 ]
 
+# Reference implementation, kept for bench/ comparisons only. Never installed in
+# the image: it pulls torch and roughly 5.5 GB of nvidia wheels.
+OPENAI_BACKEND = [
+    'openai-whisper==20250625',
+    'torch',
+]
+
+# DISABLED (translation): ollama is the client for path C's LLM translation.
+# It is an extra rather than a runtime dependency now that translation is out of
+# scope -- restoring path C means adding it back to install_requires.
+TRANSLATE = [
+    'ollama',
+]
+
 BENCH = [
     'jiwer',
     'sacrebleu',
+    'datasets',
 ]
 
 setup(
@@ -32,12 +41,12 @@ setup(
         'PyYAML',
         'dacite',
         'setproctitle',
-        'ollama',
     ],
     extras_require={
-        'openai': OPENAI_BACKEND,
         'ct2': CT2_BACKEND,
+        'openai': OPENAI_BACKEND,
+        'translate': TRANSLATE,
         'bench': BENCH,
-        'all': OPENAI_BACKEND + CT2_BACKEND + BENCH,
+        'all': CT2_BACKEND + OPENAI_BACKEND + TRANSLATE + BENCH,
     },
 )
