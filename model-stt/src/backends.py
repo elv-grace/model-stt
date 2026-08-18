@@ -75,6 +75,9 @@ class DecodeOptions:
     # hallucinations in non-speech.
     beam_size: Optional[int] = None
     temperature: Sequence[float] = TEMPERATURE_FALLBACK
+    # Swap the sampled retry rungs for deterministic ones, making the decoder
+    # reproducible. faster-whisper only; see _DeterministicFallback.
+    deterministic_fallback: bool = False
     compression_ratio_threshold: Optional[float] = 2.4
     logprob_threshold: Optional[float] = -1.0
     no_speech_threshold: Optional[float] = 0.6
@@ -178,8 +181,16 @@ class OpenAIWhisperBackend(WhisperBackend):
         # transcribe() runs once per media file, so the vad_filter warning below
         # is emitted once per model rather than once per file
         self._warned_vad = False
+        self._warned_deterministic = False
 
     def transcribe(self, fpath: str, opts: DecodeOptions) -> Transcription:
+        if opts.deterministic_fallback and not self._warned_deterministic:
+            logger.warning(
+                "openai-whisper has no deterministic-fallback path; the sampled "
+                "temperature ladder still applies and output stays irreproducible."
+            )
+            self._warned_deterministic = True
+
         if opts.vad_filter and not self._warned_vad:
             # say so rather than ignoring it silently: bench uses the DecodeOptions
             # defaults, so an openai run would request VAD, not get it, and be
@@ -238,6 +249,83 @@ class OpenAIWhisperBackend(WhisperBackend):
         return Transcription(language=result.get("language"), segments=segments)
 
 
+class _DeterministicFallback:
+    """Replaces whisper's *sampled* retry with a deterministic escalation.
+
+    Whisper retries a decode that trips compression_ratio_threshold or
+    logprob_threshold, walking up a temperature ladder. Every rung above 0 samples
+    (faster-whisper: beam_size=1, sampling_topk=0, num_hypotheses=best_of), and
+    that sampling cannot be seeded -- ctranslate2.set_random_seed has no effect on
+    it, verified with forced sampling and with the seed set before model
+    construction, and Whisper.generate() has no per-call seed. So the shipped
+    decoder is not reproducible.
+
+    The retry's value is not the randomness, though: it is the reject-and-retry
+    loop around it. Sampling is only how faster-whisper makes a retry come out
+    differently. Escalating deterministic parameters instead keeps the loop and
+    drops the randomness. This proxy sits in front of the CTranslate2 model and
+    swaps each sampled rung for the corresponding entry below.
+
+    Measured on 600s of NBAallstar (repeated segments, lower is better):
+
+        no retry at all (temperature=[0.0])   228   reproducible
+        deterministic ladder                   55   reproducible
+        shipped sampled ladder                 30   NOT reproducible
+
+    So it recovers most of the suppression and all of the reproducibility. FLEURS
+    en is unchanged at 4.33% WER / 2.08% CER, because clean speech rarely trips a
+    threshold and so rarely reaches a rung above 0.
+
+    Off by default: the residual gap to the sampled ladder is real, and on real
+    media the run-to-run variation the sampled ladder causes is 10-18% WER without
+    a matching swing in defect counts. Turn it on when reproducibility is worth
+    more than the last of the repetition suppression -- benchmarking, diffing two
+    runs, cache keys, QA sign-off.
+
+    This reaches into faster-whisper's call into CTranslate2, so it is coupled to
+    that call's keyword arguments and should be re-checked on upgrade. If those
+    names change, the proxy stops intervening rather than misbehaving: `enabled`
+    only fires when a `sampling_temperature` keyword is actually present.
+    """
+
+    # index i replaces temperature ladder rung i. Rung 0 is never reached (a
+    # temperature of 0 does not take faster-whisper's sampling branch) and is
+    # present only to keep the indices aligned with the temperature list.
+    RUNGS = (
+        {"beam_size": 1},
+        {"beam_size": 5, "patience": 1.0},
+        {"beam_size": 5, "patience": 1.0, "repetition_penalty": 1.15},
+        {"beam_size": 5, "patience": 1.0, "repetition_penalty": 1.35},
+        {"beam_size": 5, "patience": 1.0, "repetition_penalty": 1.35,
+         "no_repeat_ngram_size": 4},
+        {"beam_size": 8, "patience": 2.0, "repetition_penalty": 1.6,
+         "no_repeat_ngram_size": 3},
+    )
+
+    def __init__(self, inner):
+        self._inner = inner
+        self.enabled = False
+        self.temperatures: List[float] = []
+
+    def __getattr__(self, name):
+        # only reached for names not on the proxy itself
+        return getattr(self._inner, name)
+
+    def generate(self, *args, **kwargs):
+        temperature = kwargs.get("sampling_temperature")
+        if self.enabled and temperature:
+            try:
+                rung = self.temperatures.index(temperature)
+            except ValueError:
+                rung = len(self.RUNGS) - 1
+            kwargs.pop("sampling_temperature", None)
+            kwargs.pop("sampling_topk", None)
+            kwargs.pop("num_hypotheses", None)
+            # these two arrive from the caller's options; the rung overrides them
+            kwargs.update(self.RUNGS[min(rung, len(self.RUNGS) - 1)])
+        return self._inner.generate(*args, **kwargs)
+
+
 class FasterWhisperBackend(WhisperBackend):
     name = "faster-whisper"
 
@@ -270,6 +358,17 @@ class FasterWhisperBackend(WhisperBackend):
             compute_type=compute_type,
             cpu_threads=cpu_threads,
         )
+        # Installed unconditionally and armed per decode from DecodeOptions, so
+        # the flag can vary call to call without rebuilding the model.
+        #
+        # It is not free when disabled: generate() takes an extra Python call, and
+        # every *other* attribute faster-whisper reads off the CTranslate2 object
+        # (encode, align, detect_language, device, is_multilingual) now resolves
+        # through __getattr__ rather than directly. Measured at +58ms on a 3.9s
+        # decode, +1.5%, with byte-identical output. Cheap enough to leave in
+        # place; not zero, as an earlier version of this comment claimed.
+        self._fallback = _DeterministicFallback(self.model.model)
+        self.model.model = self._fallback
 
     def transcribe(self, fpath: str, opts: DecodeOptions) -> Transcription:
         try:
@@ -288,6 +387,8 @@ class FasterWhisperBackend(WhisperBackend):
             return self._run(fpath, replace(opts, word_timestamps=False))
 
     def _run(self, fpath: str, opts: DecodeOptions) -> Transcription:
+        self._fallback.enabled = opts.deterministic_fallback
+        self._fallback.temperatures = list(opts.temperature)
         segment_iter, info = self.model.transcribe(
             fpath,
             task=opts.task,

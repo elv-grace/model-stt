@@ -210,6 +210,18 @@ class RuntimeConfig:
     # recovers it. Fix the cause, do not delete the symptom -- see the two-stage
     # profile in config.yml.
 
+    # Make the decoder reproducible by replacing whisper's *sampled* retry rungs
+    # with deterministic ones. faster-whisper only. See _DeterministicFallback for
+    # the measurements; in short it recovers most of the repetition suppression
+    # (55 repeated segments against the sampled ladder's 30, and 228 with no retry
+    # at all) and all of the reproducibility, at no cost on FLEURS.
+    #
+    # Off by default because the residual gap is real. Turn it on when
+    # reproducibility is worth more than the last of the suppression: benchmarking,
+    # diffing two runs, cache keys, QA sign-off. The `reproducible` profile in
+    # config.yml does exactly that and nothing else.
+    deterministic_fallback: bool = False
+
     beam_size: Optional[int] = None
     compute_type: str = "float16"  # faster-whisper only
     device: Optional[str] = None
@@ -222,9 +234,11 @@ class WhisperSTT(AVModel):
         models: Dict,
         weights_dir: str,
         sentence_gap_ms: float = 5000,
+        max_caption_words: int = 100,
     ):
         self.cfg = cfg
         self.sentence_gap_ms = sentence_gap_ms
+        self.max_caption_words = max_caption_words
         _validate(cfg, models)
 
         # DISABLED (translation): was _resolve_model(), which substituted
@@ -302,13 +316,26 @@ class WhisperSTT(AVModel):
             vad_threshold=self.cfg.vad_threshold,
             vad_min_silence_ms=self.cfg.vad_min_silence_ms,
             vad_speech_pad_ms=self.cfg.vad_speech_pad_ms,
+            deterministic_fallback=self.cfg.deterministic_fallback,
         )
 
         result = self._transcribe_with_guards(fpath, opts)
         # before _filter_segments: a straddled segment has an inflated span, so
         # the sub-100ms repair there must see the corrected timings, not the
         # inflated ones
-        segments = _repair_straddles(result.segments, self.cfg.straddle_gap_max)
+        segments = result.segments
+        # Only with VAD on. A straddle is restore_speech_timestamps mapping a
+        # segment's words back across an excision, and that runs only when
+        # faster-whisper was handed speech chunks. With VAD off the timestamps are
+        # already in source-media time, so every intra-segment gap is REAL and
+        # repairing one does active harm: measured over 13.2h decoded without VAD
+        # it fired 9 times, all false positives. On the clearest, whisper merged an
+        # "Oh," at 32.24s with a "my God." at 38.48s into one segment; the repair
+        # anchored on "Oh," and emitted the phrase at 32.24-33.80, placing
+        # "my God." five seconds from where it was said. Another collapsed a
+        # segment to zero duration.
+        if self.cfg.vad_filter:
+            segments = _repair_straddles(segments, self.cfg.straddle_gap_max)
         segments = self._filter_segments(segments)
         # last: isolation is measured against the segments that survive, so a
         # neighbour dropped as silence above must not still count as company
@@ -326,7 +353,7 @@ class WhisperSTT(AVModel):
         if self.cfg.word_level:
             tags.extend(self._word_tags(segments, fpath, text_language))
 
-        sentences = to_sentences(segments, self.sentence_gap_ms)
+        sentences = to_sentences(segments, self.sentence_gap_ms, self.max_caption_words)
         if self.cfg.sentence_level:
             tags.extend(self._sentence_tags(sentences, fpath, text_language, SENTENCE_TRACK))
 
@@ -545,8 +572,8 @@ def _repair_straddles(segments: List[Segment], max_gap: float) -> List[Segment]:
     duration.
 
     Re-anchoring rather than splitting is what keeps the sentence track whole:
-    to_sentences() breaks on a gap of sentence_gap ms, so an unrepaired straddle
-    does not merely mistime the text, it tears it into "Good" and "luck, guys."
+    Without it the segment's span stays inflated across the excision, and every
+    word after the cut is reported at a time it was not spoken.
     """
     repaired: List[Segment] = []
     for i, seg in enumerate(segments):

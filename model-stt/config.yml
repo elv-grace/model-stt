@@ -48,8 +48,30 @@ models:
 # translate_fallback: large-v3
 
 postprocessing:
-  # words more than this far apart (ms) are never merged into one sentence
+  # Applied ONLY to a trailing run that reaches the end of the file with no
+  # terminal punctuation -- the dropped-full-stop case, where there is no
+  # punctuation to trust and a long silence is the best boundary evidence there
+  # is. A pause inside a *punctuated* sentence no longer ends a caption: that
+  # tore real sentences apart whenever the pause in them was genuine.
   sentence_gap: 5000
+
+  # Backstop for whisper's degenerate no-punctuation decode, which once produced a
+  # single 1595-word caption. A caption with more words than this is split at its
+  # widest internal pause, repeatedly.
+  #
+  # Keyed on word count, not duration: duration does not measure how much a
+  # caption contains, and a 3-word caption spanning minutes is not too long while
+  # a 1595-word one is.
+  #
+  # 150 because no single spoken sentence runs that long in any language, so
+  # anything above it is a decode failure by construction -- deliberately NOT
+  # tuned to this fixture set, where it would sit near 100 (~2x the p99 of 47).
+  # The extra headroom costs nothing: the failure case is 1595 words, 34x beyond
+  # p99, so any value from ~150 to ~500 catches it identically, while 150 leaves
+  # legitimately long captions alone (0.08% of the set, against 0.28% at 100).
+  # This is a safety valve, not a classifier -- if it fires often, something
+  # upstream is wrong.
+  max_caption_words: 150
 
 runtime:
   default:
@@ -93,6 +115,47 @@ runtime:
     vad_threshold: 0.25
     vad_min_silence_ms: 2000
     vad_speech_pad_ms: 2000
+
+    # Isolated-artifact guard. NOT a general hallucination filter -- it catches
+    # one specific failure, the stock phrase ("Thank you.") whisper emits over
+    # non-speech because subtitle data is full of it. It cannot catch a confident
+    # one-off invention like a wrong proper noun, and nothing here tries to:
+    # every confidence signal whisper exposes was measured NOT to separate
+    # invented text from real (see README).
+    #
+    # Surfaced here rather than left in RuntimeConfig because the three thresholds
+    # decide whether real speech gets deleted, and the right values are
+    # content-dependent. A file must contain at least `min_count` copies of the
+    # same short text, that text must be isolated *as a rule* (median gap to its
+    # nearest neighbour at or above `gap`), and only the copies that are
+    # themselves isolated are dropped. Raise `gap` or `min_count` to be more
+    # conservative; set `gap` to 0 to disable entirely.
+    #
+    # Deliberately self-calibrating rather than a list of known whisper phrases:
+    # such a list could only be assembled by reading one fixture set and would not
+    # transfer to another language. Held out one file at a time on the fixtures,
+    # the learned phrases stayed stable and no verified-real caption was dropped.
+    isolated_artifact_gap: 10.0
+    isolated_artifact_max_words: 3
+    isolated_artifact_min_count: 4
+
+  # Reproducible decoding. Replaces whisper's sampled retry rungs with a
+  # deterministic escalation, so the same input gives byte-identical output.
+  #
+  # The shipped decoder is NOT reproducible and cannot be made so by seeding:
+  # ctranslate2.set_random_seed has no effect on the sampling (verified with
+  # forced sampling and with the seed set before model construction) and
+  # Whisper.generate() has no per-call seed. Run-to-run divergence measured at
+  # 10-18% WER on the same file, because one retry shifts a segment boundary and
+  # re-segments everything after it.
+  #
+  # Costs some repetition suppression -- 55 repeated segments on a 600s slice
+  # against the sampled ladder's 30, where no retry at all gives 228 -- and is
+  # slower, since retries use beam search rather than greedy sampling. FLEURS is
+  # unchanged. Compose it with a content profile by passing both, e.g.
+  # {"profile": "clean-audio", "deterministic_fallback": true}.
+  reproducible:
+    deterministic_fallback: true
 
   # VAD on, for content with distinguishable silence: scripted film and TV, studio
   # recordings, anything where speech is separated by real quiet rather than by a

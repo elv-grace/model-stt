@@ -287,10 +287,11 @@ def test_segment_straddling_a_vad_cut_is_pulled_back_together(make_model):
         word(" luck,", 333.54, 333.66),
         word(" guys.", 333.70, 333.92),
     ])
-    tags = make_model(Transcription(language="en", segments=[straddled])).tag(FILE)
+    tags = make_model(
+        Transcription(language="en", segments=[straddled]), cfg=RuntimeConfig(vad_filter=True)
+    ).tag(FILE)
 
     sentences = tracks(tags, SENTENCE_TRACK)
-    # unrepaired, to_sentences() splits on the 207s gap into "Good" / "luck, guys."
     assert [t.tag for t in sentences] == ["Good luck, guys."]
     # the run holding the most spoken time wins, so the phrase lands at ~333s;
     # decoding the same audio unfiltered puts it at 333.06-333.90
@@ -315,7 +316,7 @@ def test_repaired_straddle_does_not_overlap_its_neighbours(make_model):
     before = segment([word(" Who did that?", 124.5, 126.4)])
     straddled = segment([word(" Good", 126.7, 126.95), word(" luck.", 127.2, 127.4)])
     after = segment([word(" See you.", 127.5, 128.0)])
-    cfg = RuntimeConfig(straddle_gap_max=0.2)  # force both runs to be split
+    cfg = RuntimeConfig(vad_filter=True, straddle_gap_max=0.2)  # force both runs split
     tags = make_model(
         Transcription(language="en", segments=[before, straddled, after]), cfg=cfg
     ).tag(FILE)
@@ -444,3 +445,60 @@ def test_shipped_defaults_decode_everything_unconditioned(make_model, hello_worl
     opts = model.backend.calls[0]
     assert opts.vad_filter is False
     assert opts.condition_on_previous_text is False
+
+
+def test_straddle_repair_does_not_run_without_vad(make_model):
+    """A straddle is restore_speech_timestamps mapping words back across a VAD
+    excision. With VAD off there is no excision, every gap is real, and repairing
+    one moves real speech: over 13.2h it fired 9 times, all false positives."""
+    real_pause = segment([
+        word(" Oh,", 32.24, 33.04),
+        word(" my", 38.48, 38.84),
+        word(" God.", 38.84, 39.24),
+    ])
+    tags = make_model(Transcription(language="en", segments=[real_pause])).tag(FILE)
+
+    assert [(t.start_time, t.end_time) for t in tracks(tags, WORD_TRACK)] == [
+        (32240, 33040), (38480, 38840), (38840, 39240)
+    ]
+
+
+def test_default_keeps_a_punctuated_sentence_whole_across_a_long_pause(make_model):
+    """Both halves of the fix, on the shipped default. The repair is off (VAD is
+    off) so the word timings stay as decoded, and to_sentences no longer ends a
+    caption on a pause, so the sentence is not torn."""
+    seg = segment([
+        word(" Oh,", 32.24, 33.04),
+        word(" my", 38.48, 38.84),
+        word(" God.", 38.84, 39.24),
+    ])
+    sentences = tracks(make_model(Transcription(language="en", segments=[seg])).tag(FILE),
+                       SENTENCE_TRACK)
+
+    assert [t.tag for t in sentences] == ["Oh, my God."]
+    assert (sentences[0].start_time, sentences[0].end_time) == (32240, 39240)
+
+
+def test_default_does_not_split_good_luck_guys(make_model):
+    """The same input as the straddle test, decoded WITHOUT vad: nothing repairs
+    the timings, and nothing tears the sentence either."""
+    seg = segment([
+        word(" Good", 126.71, 126.95),
+        word(" luck,", 333.54, 333.66),
+        word(" guys.", 333.70, 333.92),
+    ])
+    sentences = tracks(make_model(Transcription(language="en", segments=[seg])).tag(FILE),
+                       SENTENCE_TRACK)
+
+    assert [t.tag for t in sentences] == ["Good luck, guys."]
+    assert (sentences[0].start_time, sentences[0].end_time) == (126710, 333920)
+
+
+def test_deterministic_fallback_is_off_by_default_and_reaches_the_backend(make_model, hello_world):
+    default = make_model(hello_world)
+    default.tag(FILE)
+    assert default.backend.calls[0].deterministic_fallback is False
+
+    opted_in = make_model(hello_world, cfg=RuntimeConfig(deterministic_fallback=True))
+    opted_in.tag(FILE)
+    assert opted_in.backend.calls[0].deterministic_fallback is True

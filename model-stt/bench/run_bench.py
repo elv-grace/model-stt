@@ -126,6 +126,7 @@ def run_system(
         models=config["models"],
         weights_dir=config["storage"]["weights_dir"],
         sentence_gap_ms=config["postprocessing"]["sentence_gap"],
+        max_caption_words=config["postprocessing"]["max_caption_words"],
     )
     load_seconds = time.perf_counter() - load_start
 

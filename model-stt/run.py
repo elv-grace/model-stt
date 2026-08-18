@@ -32,6 +32,7 @@ if __name__ == '__main__':
         models=config["models"],
         weights_dir=config["storage"]["weights_dir"],
         sentence_gap_ms=config["postprocessing"]["sentence_gap"],
+        max_caption_words=config["postprocessing"]["max_caption_words"],
         # DISABLED (translation): translate_fallback / translator_cfg
     )
 

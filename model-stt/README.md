@@ -22,17 +22,61 @@ The three configurations that were evaluated, and why this one:
 | `""` | Word-level tags, one per word. |
 | `"auto_captions"` | Sentence-level tags. |
 
-Sentences are split on terminal punctuation (`. ? ! 。 ？ ！`, with abbreviation and initial
-exceptions so `"Mr. Anthony Eden"` stays one tag) or on a silence gap longer than
-`postprocessing.sentence_gap` (see `config.yml`). Whisper's own segments are decoder windows, not sentences, so the
-sentence track is rebuilt from word timings rather than used as-is.
+A caption ends at terminal punctuation (`. ? ! 。 ？ ！`, with abbreviation and initial exceptions so
+`"Mr. Anthony Eden"` stays one tag) — the same primary rule as model-asr's `_merge_to_sentences`.
+Whisper's own segments are decoder windows, not sentences, so the sentence track is rebuilt from word
+timings rather than used as-is.
 
-> **Known issue: captions are unbounded.** Those two are the *only* flush conditions, so if whisper
-> stops emitting terminal punctuation and the audio has no `sentence_gap`-long pause, a caption grows
-> without limit. Fast sports play-by-play hits this: `NBAallstar.mp4` produced a single **1595-word,
-> 608.8-second** caption whose largest inter-word gap was 3.4s, under the 5s backstop. Needs a third
-> flush condition — a maximum duration or word count, breaking at the largest gap in the accumulated
-> run so the split lands on a plausible boundary. Not yet implemented.
+**A pause never ends a caption.** An earlier version also split on any silence over
+`postprocessing.sentence_gap`, which tore punctuated sentences apart whenever the pause inside them
+was genuine — whisper merged an `"Oh,"` at 32.24s with a `"my God."` at 38.48s into one segment and
+the silence rule emitted them as two tags. Speakers pause mid-sentence, and with VAD off the
+timestamps either side of a pause are true, so there is nothing to repair. Equivalently: rather than
+splitting on a pause and then merging back every fragment that does not end in terminal punctuation,
+the split is never made.
+
+Two backstops cover the cases where punctuation cannot be trusted:
+
+| | Applies to | Behaviour |
+|---|---|---|
+| `postprocessing.max_caption_words` (150) | Whisper's unpunctuated run-on decode (below) | Split at the widest internal pause, repeatedly, until every piece fits |
+| `postprocessing.sentence_gap` (5000ms) | A trailing run reaching the end of the input without ever terminating — possibly a genuine unfinished thought rather than a failure | The original dropped-full-stop rule: whisper sometimes omits a full stop, and without one the accumulator runs on into the *next* utterance, so a long silence ends the caption instead |
+
+`max_caption_words` is only the *trigger*; cuts always land on pauses, so this stays pause-based
+segmentation with the threshold found adaptively. A fixed threshold cannot work — the worst observed
+caption's widest internal pause was 3.4s, under any sane fixed value, so it would never have split.
+Such a cut can land mid-sentence, which is unavoidable once the text has no sentence boundaries left
+to respect. 150 is chosen because no single spoken sentence runs that long in any language, so
+anything above it is a decode failure by construction; it is deliberately *not* tuned to the fixture
+set, where it would sit near 100. It is a safety valve — if it fires often, something upstream is wrong.
+
+Restricting `sentence_gap` to the trailing run gives up the mid-file case it was written for: a
+dropped full stop between two utterances 39s apart now yields one caption spanning 39s. That is
+deliberate — without punctuation it is indistinguishable from a real sentence containing a long
+pause, which is the `"Oh, my God."` case above, and trusting punctuation means trusting it both ways.
+
+**The unpunctuated run-on decode is a model behaviour, not a pipeline fault.** This README already
+noted it for `large-v3` (*"sometimes drops punctuation and casing... collapses the sentence track from
+16 segments to 3"*); it happens on turbo too. `NBAallstar.mp4` once produced a single **1595-word**
+lowercase caption this way, and `NFL.mp4` still does — *"earlier in the game the way this defense is
+playing Stafford gonna go deep to..."*, a 62s unpunctuated run. Every plausible cause has been
+eliminated by measuring the word tags in both instances:
+
+| signal | value in the run-on region | rules out |
+|---|---|---|
+| `temperature` | **0.0** on every word | the temperature fallback (that file has 82 words above 0 elsewhere) |
+| `condition_on_previous_text` | `False` in the run that produced it | prompt feedback |
+| `compression_ratio` | 1.61–1.76 | a repetition loop |
+| `no_speech_prob` / `avg_logprob` | 0.0 / −0.09 to −0.31 | low confidence — the decoder is *sure* |
+
+So it is a first-pass greedy decode that whisper is confident about and simply does not punctuate.
+Nothing downstream can detect it from the decoder's own signals, which is exactly why the backstop is
+structural rather than confidence-based.
+
+> **Residual case, not handled.** Captions are bounded by word count, not span, so a *short*
+> unpunctuated run can still stretch a long way: `equalizer.mp4` yields an 82-word caption spanning
+> **303s** over sung lyrics. Bounding by span instead would re-tear `"Good luck, guys."` (3 words,
+> 207s), which is the tradeoff this design deliberately takes — punctuation is trusted over duration.
 
 Every tag carries `additional_info["language"]`, so a consumer never has to infer a track's language
 from the config that produced it. Timestamps are milliseconds relative to the file passed to `tag()`.
@@ -120,6 +164,7 @@ Two profiles ship:
 |---|---|---|---|
 | `default` | **off** | off | Everything by default. Decode all the audio and let the decoder's own guards filter. |
 | `clean-audio` | on, `threshold 0.25` / `speech_pad 2000ms` | on | Content with *distinguishable silence* — scripted film, studio recordings — where suppressing stock-phrase artifacts is worth more than recall. |
+| `reproducible` | inherits | inherits | Byte-identical output across runs. Sets `deterministic_fallback` only, so compose it with either profile above. See [the reproducible profile](#the-reproducible-profile). |
 
 The two fields in each profile are a pair, not independent knobs. With VAD off the decoder sees noise
 it used to be shielded from, and a *conditioned* decode locks onto a phrase and repeats it; turning
@@ -133,7 +178,7 @@ See [recall and hallucination](#recall-and-hallucination-what-vad-costs).
 ## Testing
 
 ```bash
-make pytest                # 81 unit tests, no weights or GPU needed
+make pytest                # 87 unit tests, no weights or GPU needed
 pytest -m weights tests/   # end-to-end against real weights
 make test                  # container end-to-end (buildscripts/testers/test-model.sh)
 ```
@@ -184,31 +229,48 @@ metadata — so faster-whisper's ~2.3x speed win is free here. They *do* diverge
 material (216 vs 206 tags on a 162s song), so this is **not** a universal guarantee.
 
 **Measured with VAD off on both**, which is what the shipped configuration now is again. The
-equivalence does not survive noisy audio. On 600s of basketball crowd noise:
+equivalence does not survive noisy audio.
 
-| | segments | words | repeated segments |
-|---|---|---|---|
-| openai-whisper (no VAD exists) | 24 | 99 | 19 |
-| faster-whisper, vad off | 38 | 141 | **31** |
-| faster-whisper, vad on | 12 | 71 | **0** |
+An earlier version of this section reported a single run over "600s of basketball crowd noise"
+(openai 24 segments / 19 repeated, CT2 unfiltered 38 / 31, CT2 with VAD 12 / 0) and concluded that
+faster-whisper hallucinates more unfiltered. **Both the fixture and the method were wrong**, so the
+rows below replace it:
 
-> **Correction — read the last column with suspicion.** The NBAallstar slice used as the
-> "crowd noise" fixture is not crowd noise. Roughly the first 340s of `1200-1800s` is the All-Star
-> player introductions, transcribed accurately down to the spellings of Antetokounmpo and
-> Gilgeous-Alexander; only the last ~230s is genuine non-speech. A later sweep scored that whole
-> slice as hallucination, which made VAD look free and VAD-off look catastrophic — it is neither, and
-> the `vad on → 0` row is partly VAD suppressing **real speech**. The columns above were not
-> re-measured; treat "repeated segments" as an upper bound on hallucination and see
-> [recall and hallucination](#recall-and-hallucination-what-vad-costs) for the corrected picture.
+- The fixture is not crowd noise. `NBAallstar 1200-1800s` is ~340s of All-Star player introductions —
+  transcribed accurately, down to the spellings of Antetokounmpo and Gilgeous-Alexander — followed by
+  ~260s of genuine non-speech.
+- Single runs cannot support the comparison. Output is not reproducible under the shipped temperature
+  ladder (see [reproducibility](#output-is-not-reproducible)), and repeated-segment counts vary by
+  2–3x run to run.
 
-**Unfiltered, faster-whisper hallucinates more than openai-whisper here**, not
-less. The backend choice therefore rests on VAD being *available*, not on CT2 decoding better.
-openai-whisper has no VAD to turn on — it detects silence from the decoder's own `no_speech_prob`,
-which is exactly the signal that fails when the model is confident it heard speech in music or crowd
-noise. whisper's own source concedes the gap (`timing.py`: *"a better segmentation algorithm based
-on VAD should be able to replace this"*). With VAD on, CT2 scores en 4.21% / fr 6.82% WER against
-openai's 4.33% / 6.46% — comparable on clean speech. That argument still holds for keeping the option;
-it no longer holds for keeping it *on* by default.
+Re-measured on that slice, 3 reps under the shipped ladder, reported as min–max:
+
+| | segments | words | repeated | segments in the *speech* half |
+|---|---|---|---|---|
+| openai-whisper (no VAD exists) | 39–52 | 316–431 | 11–24 | 25–28 |
+| faster-whisper, vad off | 37–55 | 326–354 | 9–31 | 24–28 |
+| faster-whisper, vad on `0.5/400` | **0** | 0 | 0 | **0** |
+| faster-whisper, vad on `0.25/2000` | 1 | 2 | 0 | 1 |
+
+**The two backends are indistinguishable** — every range overlaps. Neither "CT2 hallucinates more"
+nor "less" survives replication; both were single-run noise.
+
+**What does survive is the VAD row.** At Silero's own defaults VAD emitted *zero segments* for 600
+seconds containing 340s of clean announcer speech, and one segment at the tuned setting. The old
+`vad on → 0 repeated` looked like clean suppression; it is total suppression. That is the finding
+that moved VAD out of the default (see
+[recall and hallucination](#recall-and-hallucination-what-vad-costs)).
+
+The VAD rows are reproducible; the two unfiltered rows are not, hence the ranges. Pinning
+`temperature=[0.0]` makes all four reproducible but measures a different system — repetition on
+`vad off` jumps to 107, because the temperature fallback *is* the repetition guard.
+
+The backend choice therefore no longer rests on VAD at all. It rests on speed, on the absence of a
+torch dependency, and on VAD remaining *available* for the `clean-audio` profile. openai-whisper has
+no VAD to turn on — it detects silence from the decoder's own `no_speech_prob`, exactly the signal
+that fails when the model is confident it heard speech in music or crowd noise. whisper's own source
+concedes the gap (`timing.py`: *"a better segmentation algorithm based on VAD should be able to
+replace this"*). With VAD on, CT2 scores en 4.21% / fr 6.82% WER against openai's 4.33% / 6.46%.
 
 WER is reported as n/a for Chinese: the script has no whitespace word boundary, and FLEURS ships its
 Chinese references space-separated per character. Scoring naively gives ~100% WER and ~50% CER on a
@@ -241,9 +303,9 @@ the sentence track takes its boundaries from punctuation.
 
 ### Recall and hallucination: what VAD costs
 
-Measured on the seven `test-files/` fixtures — 13.2h of audio, 12.6h of it decodable
-(`NBAsummerleague33min.mp4` has no audio stream) — on one L40S. The full set runs in **7.8 minutes**
-at 102x realtime, 2556 MiB peak.
+Measured on the `test-files/` fixtures on one L40S. The current set is 8 files; `NBAsummerleague33min.mp4`
+has no audio stream and is skipped. The full set runs in **10.0 minutes**, 2556 MiB peak, producing
+101,588 tags into `test-output/out.jsonl`.
 
 The central finding is that **VAD-strictness and hallucination are not one axis you can tune.**
 Speech-over-loud-crowd (wants permissive VAD) and crowd-without-speech (wants aggressive VAD) are the
@@ -289,9 +351,9 @@ them from real speech: **company**.
 
 Over `NBAallstar`, `"Thank you."` captions sat a median **18.9s** from their nearest neighbour (36 of
 55 more than 10s away), against **0.2s** for substantive captions (1588 of 1661 within 2s). Two orders
-of magnitude, so the threshold is not a knife-edge. Across 13.2h it fired 5 times and dropped 49
-segments; FLEURS moved `+0.00pp` on all seven metrics, since 10-second utterances never reach
-`min_count=4`.
+of magnitude, so the threshold is not a knife-edge. On the current fixture set it fires 7 times and
+drops 81 segments of 11,850 captions (0.7%); FLEURS moves `+0.00pp` on all seven metrics, since
+10-second utterances never reach `min_count=4`.
 
 Both conditions are required, and it is deliberately **not** a list of known whisper phrases:
 
@@ -301,10 +363,20 @@ Both conditions are required, and it is deliberately **not** a list of known whi
 - **A hardcoded phrase list** worked, but could only be assembled by reading this fixture set, and
   would not transfer to another language where whisper has different stock phrases.
 - The self-calibrating rule was validated **leave-one-file-out**: the learned set stayed stable
-  (`{'thank you', 'oh my god'}`) whichever file was held out, and no validated-real caption was
-  dropped in any held-out file.
+  whichever file was held out, and no validated-real caption was dropped in any held-out file.
 
-Disable with `isolated_artifact_gap: 0`.
+**Per-file calibration is the point, and it does real work.** The learned phrases are not a fixed
+set — they differ by file, including phrases that look far too common to touch. On `equalizer.mp4`
+the guard learned `'i dont know'` and `'im sorry'` and dropped 17 captions of 1439 (1.2%);
+re-decoding every one of them with fresh context, **14 of 17 returned completely different text**
+(`"I don't know."` → `"I'm going to go ahead and cook it."`), and 2 of the remaining 3 re-decoded into
+an `"I'm sorry."` ×6 loop rather than clean speech. Meanwhile `spiderman-across-the-spiderverse`
+*kept* all 14 of its `'i dont know'` captions, because there they sit in conversation and fail the
+median-isolation test. A global list would have had to choose one behaviour for both files.
+
+Disable with `isolated_artifact_gap: 0`. Note what it does **not** do: it catches one specific
+failure — the recurring stock phrase over non-speech — and cannot catch a confident one-off
+invention such as a wrong proper noun. Nothing in this pipeline can; see below.
 
 #### Three things that do not work, with the evidence
 
@@ -340,29 +412,96 @@ word's duration, clamped so they cannot overlap neighbouring segments. The examp
 333.30–333.94. Threshold justification: across **4096** genuine intra-segment word gaps measured with
 VAD off (where no excision is possible) over film, animation and sports, exactly **one** exceeded 2.0s.
 
-It fired 50 times across 13.2h. It bounds an unbounded error rather than guaranteeing correctness —
-the anchor is a majority heuristic, and it cannot repair *text* that whisper merged lossily, only the
-span.
+It fired 50 times across 13.2h **with VAD on**, and is skipped entirely with VAD off. That gate is
+not an optimisation. With VAD off the timestamps are already in source-media time, so every
+intra-segment gap is real, and repairing one moves real speech: over the same 13.2h decoded without
+VAD it fired 9 times, all false positives. On the clearest, whisper merged an `"Oh,"` at 32.24s with
+a `"my God."` at 38.48s into one segment; the repair anchored on `"Oh,"` and emitted the phrase at
+32.24–33.80, placing `"my God."` five seconds from where it was said. Another collapsed a segment to
+zero duration.
+
+It bounds an unbounded error rather than guaranteeing correctness — the anchor is a majority
+heuristic, and it cannot repair *text* that whisper merged lossily, only the span.
 
 #### Output is not reproducible
 
-Same config, same process, three consecutive runs of the same file:
+Same config, same process, four consecutive runs of the same file under the shipped default:
 
 ```
-run0: words=634 captions=148
-run1: words=634 captions=148
-run2: words=627 captions=150   <- different
+run0: words=806   run1: words=814   run2: words=806   run3: words=811     (all 4 texts differ)
 ```
 
-Whisper's temperature fallback re-decodes threshold-tripping segments with *sampling*, and with
-conditioning on, one changed segment shifts the prompt for everything after it.
-`ctranslate2.set_random_seed()` does **not** fix it — seeded runs still diverge, so float16 GPU
-reduction order is involved too.
+The cause is **whisper's temperature fallback, and only that**. A decode that trips
+`compression_ratio_threshold` or `logprob_threshold` is retried at temperature > 0, which *samples*
+rather than decoding greedily, and that sampling is unseeded. Isolated by varying one thing at a time:
 
-**There is a noise floor of roughly 1–2% on word counts.** Small run-to-run deltas mean nothing; do
-not read a ±few-hundred-word difference between two runs as a result. FLEURS numbers *are* stable,
-because clean short speech never trips the fallback. Anything below the noise floor needs a
-multi-run mean.
+| | 3 runs |
+|---|---|
+| full temperature ladder, `cond=False` (shipped) | **varies** — 182 / 185 / 193 segments |
+| `temperature=[0.0]`, `cond=False` | **bit-identical** |
+| `temperature=[0.0]`, `cond=True` | **bit-identical** |
+
+Two things this rules out, both of which earlier versions of this file asserted:
+`condition_on_previous_text` is **not** the cause (it is off by default and the output still varies;
+turning it off removes the propagation path, not the sampling), and float16 GPU reduction order is
+**not** involved (it would still vary at temperature 0, and it does not).
+`ctranslate2.set_random_seed()` does not help, because faster-whisper's sampling path does not draw
+from the seeded CT2 RNG.
+
+**There is a noise floor of roughly 1–2% on word counts**, and much larger on small counts — repeated
+segments over a 600s slice varied 2–3x. Small run-to-run deltas mean nothing. FLEURS numbers *are*
+stable, because clean short speech never trips the fallback.
+
+`temperature=[0.0]` buys bit-reproducibility but is not a usable answer: the fallback is a
+load-bearing repetition guard, and disabling it took repeated segments on one 600s slice from ~9–31
+up to **107**.
+
+#### The `reproducible` profile
+
+Seeding is not an option — `ctranslate2.set_random_seed()` has no effect on the sampling (verified
+with forced sampling, and with the seed set before model construction), and `Whisper.generate()` in
+CT2 4.8.1 has no per-call seed. Neither do the deterministic knobs substitute for the retry:
+`no_repeat_ngram_size` had *literally zero* effect, because it suppresses repeats within one 30s
+generation while the loop repeats across windows.
+
+What works is keeping the reject-and-retry loop and making the *retries* deterministic. Sampling is
+only how faster-whisper makes a retry come out differently; escalating beam size, patience,
+`repetition_penalty` and `no_repeat_ngram_size` does the same job without randomness.
+`_DeterministicFallback` in [src/backends.py](src/backends.py) proxies the CTranslate2 model and
+swaps each sampled rung for a deterministic one.
+
+```bash
+--params '{"profile": "reproducible"}'
+--params '{"profile": "clean-audio", "deterministic_fallback": true}'   # composable
+```
+
+Over the whole fixture set it is **not a quality tradeoff**:
+
+| | words | artifact-shaped captions | run-ons | wall | reproducible |
+|---|---|---|---|---|---|
+| `default` (sampled retries) | 90,254 | 57 | 19 | 601.8s | no |
+| `reproducible` (deterministic retries) | 90,509 | 57 | 17 | **529.6s** | **yes** |
+
+It is also *faster*, which is not what beam-search retries suggest: beam search escapes a failing
+decode in fewer rungs than sampling does, so there are fewer retries overall.
+
+Two honest caveats. That table is **one** draw of a nondeterministic system against a fixed one, and
+`default` varies ~2x in artifact count run to run — the real claim is that `reproducible` lands inside
+`default`'s own observed range on every metric, per file as well as in total. And on a deliberately
+fallback-heavy 600s slice the two do separate: 238 words / 48 repeated against 332–453 / 6–20. Even
+there the *speech* half is untouched (28 segments either way) and the lost words are all hallucinated
+ones, but the failure mode changes shape — deterministic retries emit more short duplicate fragments
+where sampled ones emit fewer, longer, more varied inventions. The duplicates are the more tractable
+kind, since the [isolated-artifact guard](#the-isolated-artifact-guard) catches recurring short
+phrases and cannot catch varied long ones.
+
+It is off by default because the fixture set is not broad enough to justify flipping a decoder
+default on. Turn it on when reproducibility has value on its own — benchmarking, diffing two runs,
+cache keys, QA sign-off.
+
+The proxy reaches into faster-whisper's call into CTranslate2, so it is coupled to that call's
+keyword arguments and should be re-checked on upgrade. If the names change it stops intervening
+rather than misbehaving, since it only fires when a `sampling_temperature` keyword is present.
 
 ### Against the existing taggers
 
@@ -465,7 +604,7 @@ python -m bench.score --hyp bench-output/turbo-ct2.jsonl --ref refs/ --task asr
 ```
 
 `run_bench` reports real-time factor with model load timed separately, plus per-process GPU memory
-(via `nvidia-smi`, since `torch.cuda.max_memory_allocated` sees nothing for the CT2 backend). Need to uncomment paths B and C first to replicate experiments.
+(via `nvidia-smi`, since `torch.cuda.max_memory_allocated` sees nothing for the CT2 backend). Need to uncomment paths B and C first to replicate experiments (for translation task (not in scope of tagger container)).
 
 `score` reads the common-ml `.jsonl` message format, so it scores `model-asr` and
 `model-multilingual-stt` output identically. Both sides are normalized with whisper's own

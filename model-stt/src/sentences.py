@@ -2,9 +2,15 @@
 
 Whisper already emits punctuated, cased text, so unlike model-asr there is no
 punctuation-restoration model in the loop: sentence boundaries are read straight
-off the punctuation whisper produced. The grouping rule matches
-model-asr's ASRProducer._merge_to_sentences so the two systems' sentence tracks
-are structurally comparable.
+off the punctuation whisper produced. Punctuation is the only thing that ends a
+caption, which is the same primary rule as model-asr's
+ASRProducer._merge_to_sentences, so the two systems' sentence tracks stay
+structurally comparable.
+
+One deviation from model-asr, which has no equivalent: a length backstop. See
+to_sentences. An earlier version had a second deviation -- any silence longer
+than a threshold also ended a caption -- which is now gone, so this is closer to
+model-asr than it was, not further.
 """
 from __future__ import annotations
 
@@ -92,8 +98,95 @@ def words_of(segments: List[Segment]) -> List[Word]:
     return [w for s in segments for w in s.words]
 
 
-def to_sentences(segments: List[Segment], max_gap_ms: float) -> List[Sentence]:
-    """Merge words into sentences, splitting on punctuation or a long silence.
+def _make(words: List[Word]) -> Optional[Sentence]:
+    text = "".join(w.word for w in words).strip()
+    if not text:
+        return None
+    probabilities = [w.probability for w in words]
+    return Sentence(
+        start=words[0].start,
+        end=words[-1].end,
+        text=text,
+        min_word_probability=round(min(probabilities), 4),
+        mean_word_probability=round(sum(probabilities) / len(probabilities), 4),
+    )
+
+
+def _bounded(words: List[Word], max_words: int) -> List[List[Word]]:
+    """Break an over-long run down until every piece is at most max_words long.
+
+    Split at the widest internal pause. A pause is weak evidence of a boundary --
+    which is exactly why it is no longer allowed to end a caption on its own --
+    but for a run that has to be cut somewhere it is the best evidence available.
+
+    Whisper's own segment boundaries were considered here and are worse. They are
+    decoder windows, not utterances, and land mid-phrase: on NBAallstar one
+    segment ends "...supporting more than a" and the next opens "hundred thousand
+    residents." Cutting there would split a sentence between an article and its
+    noun; cutting at a pause at least follows the audio.
+
+    Cuts always fall between words -- a word is never divided.
+
+    Iterative: a run long enough to need this can exceed a thousand words.
+    """
+    out: List[List[Word]] = []
+    stack = [words]
+    while stack:
+        run = stack.pop()
+        if len(run) < 2 or len(run) <= max_words:
+            out.append(run)
+            continue
+        at = max(range(len(run) - 1), key=lambda i: run[i + 1].start - run[i].end)
+        stack.append(run[at + 1:])
+        stack.append(run[:at + 1])
+    return out
+
+
+def to_sentences(
+    segments: List[Segment], max_gap_ms: float, max_words: int
+) -> List[Sentence]:
+    """Group words into sentences on punctuation, with two narrow backstops.
+
+    Once whisper has supplied punctuation it is the ONLY thing that ends a
+    caption, which is the same primary rule as model-asr's _merge_to_sentences. A
+    punctuated sentence is kept whole however far apart its words are:
+
+        "Oh,"  32.24-33.04    ... 5.44s of real silence ...
+        "my"   38.48-38.84
+        "God." 38.84-39.24    -> ONE caption, 32.24-39.24
+
+    An earlier version also ended a caption on any silence longer than
+    `max_gap_ms`, which tore that sentence into "Oh," and "my God.", and split
+    "Good luck, guys." the same way. A pause is not a sentence boundary --
+    speakers pause mid-sentence -- and with VAD off the timestamps either side of
+    one are true, so there is nothing to repair. Equivalently: rather than
+    splitting on a pause and then merging back any fragment that does not end in
+    terminal punctuation, never make the split.
+
+    Two cases remain where punctuation cannot be trusted, and only these:
+
+      max_words   whisper's degenerate decode, which emits a long lowercase run
+                  with no terminal punctuation anywhere -- documented in README
+                  for large-v3 ("collapses the sentence track from 16 segments to
+                  3") and seen on turbo, where it produced one 1595-word caption.
+                  Re-decoding that audio returned properly punctuated text, so it
+                  is a decode failure, not a property of the content; restoring
+                  punctuation with a separate model would treat the symptom at the
+                  cost of a ~2 GB dependency and a torch runtime this image does
+                  not have.
+
+                  This is only the TRIGGER for cutting, never the cut point -- the
+                  cuts land on pauses (see _bounded), so it remains pause-based
+                  segmentation with the threshold found adaptively rather than
+                  fixed. A fixed threshold cannot work here: that caption's widest
+                  internal pause was 3.4s, so anything above it would never split
+                  at all. Such a cut can land mid-sentence, which is unavoidable
+                  once the text has no sentence boundaries left to respect.
+      max_gap_ms  a trailing run that reaches the end of the input without ever
+                  terminating. Unlike the case above this may be a genuine
+                  unfinished thought rather than a failure, so the original
+                  dropped-full-stop rule still applies to it -- and this is the
+                  one pause cut made here rather than in _bounded.
 
     Falls back to whisper's own segmentation when word timestamps are absent.
     """
@@ -105,33 +198,28 @@ def to_sentences(segments: List[Segment], max_gap_ms: float) -> List[Sentence]:
             if s.text.strip()
         ]
 
-    max_gap_s = max_gap_ms / 1000.0
-    sentences: List[Sentence] = []
-    current: List[Word] = []
-
-    def flush() -> None:
-        if not current:
-            return
-        text = "".join(w.word for w in current).strip()
-        if text:
-            probabilities = [w.probability for w in current]
-            sentences.append(Sentence(
-                start=current[0].start,
-                end=current[-1].end,
-                text=text,
-                min_word_probability=round(min(probabilities), 4),
-                mean_word_probability=round(sum(probabilities) / len(probabilities), 4),
-            ))
-        current.clear()
-
+    groups: List[List[Word]] = [[]]
     for word in words:
-        # a long silence ends the sentence even without punctuation, so a dropped
-        # full stop cannot glue together two distant utterances
-        if current and word.start - current[-1].end > max_gap_s:
-            flush()
-        current.append(word)
+        groups[-1].append(word)
         if terminates_sentence(word.word):
-            flush()
+            groups.append([])
+    groups = [g for g in groups if g]
 
-    flush()
+    if groups and not terminates_sentence(groups[-1][-1].word):
+        trailing, run = groups.pop(), []
+        max_gap_s = max_gap_ms / 1000.0
+        for word in trailing:
+            if run and word.start - run[-1].end > max_gap_s:
+                groups.append(run)
+                run = []
+            run.append(word)
+        if run:
+            groups.append(run)
+
+    sentences = []
+    for group in groups:
+        for piece in _bounded(group, max_words):
+            sentence = _make(piece)
+            if sentence:
+                sentences.append(sentence)
     return sentences
