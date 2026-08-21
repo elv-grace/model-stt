@@ -1,0 +1,144 @@
+{
+  "meta": {
+    "purpose": "Hand-verified verbatim reference set for STT benchmarking across four failure-mode categories.",
+    "categories": {
+      "clean": "Clean, low-noise, well-recorded dialogue (little or no music/score/action under speech).",
+      "fast_overlap": "Fast, dense, and/or overlapping dialogue.",
+      "music": "Dialogue with music (score, source music, or PA/soundtrack under speech).",
+      "noise": "Dialogue with environmental / action / crowd noise."
+    },
+    "notes": "Timecodes are taken from each film's downloaded SRT and are approximate scene boundaries. VERIFY them against YOUR media before clipping; different rips/releases can differ by a few seconds to a few minutes (PAL speedup, intros, logos). Trim to the nearest natural sentence boundary in the audio."
+  },
+  "excerpts": [
+    {
+      "id": "GD1_cafe_baseline",
+      "film": "Groundhog Day (1993)",
+      "srt_project_doc": "Groundhog.Day.1993.1080p.BluRay.x265-YAWNTiC_eng.txt",
+      "primary_category": "clean",
+      "secondary_categories": [],
+      "start": "00:43:28",
+      "end": "00:45:54",
+      "cue_range": "619-663",
+      "scene": "Cafe two-hander: Phil buys Rita coffee and a doughnut; 'if you only had one day to live' and Rita's list of her ideal man.",
+      "why": "Cleanest sustained dry two-hander in the set: quiet interior, no music cue, no crowd, natural turn-taking. The low-noise ANCHOR of the calibration scale.",
+      "watch_vocab": ["Phil", "Rita", "Rome", "rocky road", "poopy"]
+    },
+    {
+      "id": "AFGM1_jessep_cross",
+      "film": "A Few Good Men (1992)",
+      "srt_project_doc": "A.Few.Good.Men.1992.2160p UHD BluRay x265 10bit RARBG.en.txt",
+      "primary_category": "clean",
+      "secondary_categories": ["fast_overlap"],
+      "start": "02:04:56",
+      "end": "02:08:00",
+      "cue_range": "1724-1772",
+      "scene": "Kaffee vs. Jessep climax: 'If you gave an order that Santiago wasn't to be touched...' through 'You can't handle the truth!' and 'You're goddamn right I did!'",
+      "why": "Clean studio courtroom audio but rapid Q&A plus a fast monologue, dense with names, ranks, and legal/military jargon. Tests clean-but-hard: does WER rise on vocabulary alone, absent noise?",
+      "watch_vocab": ["Kaffee", "Jessep", "Santiago", "Kendrick", "Guantanamo", "Gitmo", "Code Red", "grave danger", "stand a post", "Lieutenant Weinberg", "Marine", "Colonel"]
+    },
+    {
+      "id": "SN1_bar_breakup",
+      "film": "The Social Network (2010)",
+      "srt_project_doc": "The.Social.Network.2010.1080p.BluRay.x265-YAWNTiC_eng.txt",
+      "primary_category": "fast_overlap",
+      "secondary_categories": [],
+      "start": "00:00:16",
+      "end": "00:05:14",
+      "cue_range": "1-136",
+      "scene": "Opening bar scene: Mark and Erica's rapid-fire date-turned-breakup.",
+      "why": "Densest, fastest, most-overlapping dialogue in the set (~27 cues/min), the canonical Sorkin cross-talk. Pure fast/overlap failure mode with minimal noise, so it isolates speed from music/noise.",
+      "watch_vocab": ["SATs", "a cappella", "final club", "Porcellian", "Porc", "Phoenix", "Fly Club", "Theodore Roosevelt", "Eduardo", "BU", "Mensa", "IQ"]
+    },
+    {
+      "id": "WH1_rushing_dragging",
+      "film": "Whiplash (2014)",
+      "srt_project_doc": "Whiplash.2014.1080p.BluRay.x265-YAWNTiC_eng.txt",
+      "primary_category": "music",
+      "secondary_categories": ["fast_overlap"],
+      "start": "00:26:19",
+      "end": "00:29:54",
+      "cue_range": "233-296",
+      "scene": "Fletcher's 'were you rushing or dragging?' chair-throw tirade; band music under tempo corrections, then a speech-dense profane berating.",
+      "why": "Mixes music-under-speech (tempo corrections over the band) with rapid aggressive speech and drum stabs. Tests speech riding over/around live music.",
+      "watch_vocab": ["Neiman", "Whiplash", "rushing", "dragging", "tempo", "quarter note", "eighth note", "double time", "bar 125", "core", "Eugene O'Neill"]
+    },
+    {
+      "id": "BD1_coffee_run_music",
+      "film": "Baby Driver (2017)",
+      "srt_project_doc": "Baby.Driver.2017.1080p.BluRay.x265-YAWNTiC_eng.txt",
+      "primary_category": "music",
+      "secondary_categories": [],
+      "start": "00:06:39",
+      "end": "00:08:13",
+      "cue_range": "11-45",
+      "scene": "Opening 'Harlem Shuffle' coffee run: Baby walks and air-drums; brief barista order.",
+      "why": "Music-DOMINANT with sparse speech. The SRT prints song lyrics as cues, so it also tests the transcriber's (and model's) speech-vs-lyric discrimination. Extreme end of the music axis.",
+      "watch_vocab": ["Baby", "Harlem Shuffle", "medium", "coffee", "song-lyrics-are-not-speech"]
+    },
+    {
+      "id": "BD2_diner_baby",
+      "film": "Baby Driver (2017)",
+      "srt_project_doc": "Baby.Driver.2017.1080p.BluRay.x265-YAWNTiC_eng.txt",
+      "primary_category": "music",
+      "secondary_categories": [],
+      "start": "00:17:24",
+      "end": "00:19:39",
+      "cue_range": "182-229",
+      "scene": "Diner meet-cute: Baby and waitress Debora flirt while Carla Thomas 'B-A-B-Y' plays under the whole scene.",
+      "why": "Balanced dialogue-OVER-continuous-music, the everyday version of the music failure mode (vs BD1's music-dominant extreme).",
+      "watch_vocab": ["Baby", "Debora", "Debbie", "Doc", "B-A-B-Y", "Jonathan", "head west on 20"]
+    },
+    {
+      "id": "EQ1_diner_clean",
+      "film": "The Equalizer (2014)",
+      "srt_project_doc": "The.Equalizer.2014.1080p.BluRay.x265-YAWNTiC_eng.txt",
+      "primary_category": "clean",
+      "secondary_categories": [],
+      "start": "00:15:45",
+      "end": "00:18:24",
+      "cue_range": "143-177",
+      "scene": "Late-night diner two-hander: McCall ('Bob'/'Robert') and Teri/Alina talk over tea; quiet room tone.",
+      "why": "WITHIN-FILM CLEAN CONTROL for The Equalizer. Same film, mics, and cast as EQ4 but with no music. The EQ1 vs EQ4 gap directly tests whether The Equalizer's weakness is film-specific (mix/accents) or condition-specific (dense music-under-speech).",
+      "watch_vocab": ["McCall", "Robert", "Bob", "Teri", "Alina", "Slavi"]
+    },
+    {
+      "id": "EQ2_mobmeeting_overlap",
+      "film": "The Equalizer (2014)",
+      "srt_project_doc": "The.Equalizer.2014.1080p.BluRay.x265-YAWNTiC_eng.txt",
+      "primary_category": "fast_overlap",
+      "secondary_categories": ["noise"],
+      "start": "00:42:19",
+      "end": "00:44:57",
+      "cue_range": "386-421",
+      "scene": "Little John / Russians sit-down: overlapping mob crosstalk and threats, then a TV baseball broadcast ('Napoli', 'Holy cow') plays under the room.",
+      "why": "Fast overlapping crosstalk PLUS a media/broadcast bed underneath. Doubles as a noise sample for The Equalizer.",
+      "watch_vocab": ["Little John", "Frank", "Pushkin", "Teddy", "Napoli", "Boston", "the Irish", "percent"]
+    },
+    {
+      "id": "EQ3_store_robbery_noise",
+      "film": "The Equalizer (2014)",
+      "srt_project_doc": "The.Equalizer.2014.1080p.BluRay.x265-YAWNTiC_eng.txt",
+      "primary_category": "noise",
+      "secondary_categories": [],
+      "start": "00:57:11",
+      "end": "00:59:45",
+      "cue_range": "584-604",
+      "scene": "Home Mart register robbery: store ambience, raised voices, a tense stick-up over the retail floor.",
+      "why": "Environmental / action noise: big-box store room tone, movement, and shouting over the mix. The noise axis for The Equalizer.",
+      "watch_vocab": ["Jenny", "Ralphie", "Home Mart", "register", "ring", "mother's"]
+    },
+    {
+      "id": "EQ4_homemart_music",
+      "film": "The Equalizer (2014)",
+      "srt_project_doc": "The.Equalizer.2014.1080p.BluRay.x265-YAWNTiC_eng.txt",
+      "primary_category": "music",
+      "secondary_categories": ["noise"],
+      "start": "01:42:58",
+      "end": "01:45:14",
+      "cue_range": "990-1003",
+      "scene": "Home Mart finale: dialogue over the store PA song while the fight starts ('The song. Which way is it coming from?' / 'The P.A. system's in the security office.').",
+      "why": "The signature DENSE MUSIC-UNDER-SPEECH failure mode this whole set is built to adjudicate, plus action noise. Compare directly against EQ1 (same film, clean).",
+      "watch_vocab": ["McCall", "Ralphie", "P.A. system", "security office", "hostages"]
+    }
+  ]
+}
