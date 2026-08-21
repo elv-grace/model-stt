@@ -5,8 +5,12 @@ Two runtimes decode the same large-v3 / large-v3-turbo weights:
 openai          the reference implementation (openai-whisper). Requires torch.
                 Slowest, but it is the accuracy baseline and the best-documented
                 word-timestamp path, so it is what the benchmark compares against.
-faster-whisper  CTranslate2. No torch dependency, typically 3-5x faster at the
-                same accuracy with a much smaller resident footprint. Production.
+faster-whisper  CTranslate2. Typically 3-5x faster at the same accuracy with a
+                much smaller resident footprint. Production (containerized).
+                The library needs no torch -- though the image now ships it
+                anyway for src/punctuate.py, so that is no longer what keeps the
+                openai backend out; speed, GPU footprint, VAD and the hookable
+                fallback are.
 
 Both are normalized to the Transcription/Segment/Word dataclasses below so that
 model.py never branches on which runtime produced a result.
@@ -22,6 +26,7 @@ from loguru import logger
 
 # whisper's own temperature fallback ladder: each successive temperature is tried
 # when a decode trips the compression-ratio or logprob threshold
+# creates stochastic output from sampling randomness, so default shipped is a deterministic ladder instead (see _DeterministicFallback)
 TEMPERATURE_FALLBACK = (0.0, 0.2, 0.4, 0.6, 0.8, 1.0)
 
 
@@ -59,21 +64,16 @@ class Transcription:
 class DecodeOptions:
     task: str = "transcribe"
     language: Optional[str] = None
-    # Backend-level lever only. model.py always requests word timestamps: every Tag
-    # needs a start/end, and the sentence track needs word timings to place its
-    # boundaries (without them we fall back to whisper's much coarser segment
-    # boundaries). The benchmark flips this to measure what the DTW pass costs.
+    # Backend-level lever only. model.py always requests word timestamps.
+    # The benchmark flips this to measure what the DTW pass costs.
     word_timestamps: bool = True
     # off with vad_filter below; see RuntimeConfig.condition_on_previous_text
     condition_on_previous_text: bool = False
     initial_prompt: Optional[str] = None
-    # None => greedy. Deliberate, not an oversight: faster-whisper defaults to 5,
-    # openai-whisper defaults to None and picks GreedyDecoder (decoding.py:546).
-    # Swept with VAD on, beam 1 vs 5 is within noise (en 4.21 vs 4.33, fr 6.82 vs
-    # 6.19 WER at n~38), so greedy wins on speed and keeps the two backends
-    # byte-identical. Without VAD, beam=5 was worse -- it finds *more* confident
-    # hallucinations in non-speech.
-    beam_size: Optional[int] = None
+    # faster-whisper defaults to 5, openai-whisper defaults to None and picks GreedyDecoder.
+    # With VAD on, beam 1 vs 5 is within noise, so greedy wins on speed and keeps the two backends byte-identical.
+    # Without VAD, beam=5 was worse (finds more confident hallucinations in non-speech).
+    beam_size: Optional[int] = None # greedy
     temperature: Sequence[float] = TEMPERATURE_FALLBACK
     # Swap the sampled retry rungs for deterministic ones, making the decoder
     # reproducible. faster-whisper only; see _DeterministicFallback.
@@ -82,43 +82,13 @@ class DecodeOptions:
     logprob_threshold: Optional[float] = -1.0
     no_speech_threshold: Optional[float] = 0.6
     hallucination_silence_threshold: Optional[float] = 2.0
-
-    # Silero VAD. faster-whisper only; openai-whisper has no equivalent and
-    # ignores this. Off here and in RuntimeConfig -- see the reasoning there, and
-    # turn it on via the clean-audio profile.
-    #
-    # Two corrections to what earlier versions of this comment claimed, both worth
-    # keeping so they are not re-derived:
-    #
-    # 1. VAD is NOT conservative. vad_min_silence_ms only controls how long a pause
-    #    must run before VAD *closes* an already-open speech region; audio VAD
-    #    never opens in the first place is discarded whatever its length. On
-    #    spiderman-into-the-spiderverse-10min at threshold 0.5, four stretches
-    #    totalling 292s of real dialogue under a loud score never reached the
-    #    decoder.
-    # 2. The "600s of crowd noise" fixture this was tuned against was NOT crowd
-    #    noise. It is NBAallstar 1200-1800s, and roughly the first 340s of it is
-    #    the All-Star player introductions, transcribed accurately down to the
-    #    spellings of Antetokounmpo and Gilgeous-Alexander. An earlier sweep scored
-    #    those as hallucinations, which made VAD look free and VAD-off look
-    #    catastrophic. It is neither. Only the last ~230s is genuine non-speech.
-    #
-    # The sweep below is on spiderman-into-the-spiderverse-10min, whose four
-    # dropped stretches are known real dialogue, so "words" is a recall measure:
-    #
-    #   threshold  pad    kept   words   stretches recovered
-    #   0.50       400     184s    495    0 of 4        <- silero defaults
-    #   0.25       400     238s    585    2 of 4
-    #   0.15      1000     318s    652    3 of 4
-    #   0.25      2000     298s    625    4 of 4        <- clean-audio profile
-    #   off         --     591s    801    4 of 4        <- default
-    #
-    # 0.25/2000 is the best VAD-on operating point found: it recovers all four and
-    # 26% more words. Going below 0.25 buys little and costs decode stability
-    # (7-22 segments needing temperature fallback, against 0 at 0.25).
+    # Silero VAD. faster-whisper only.
+    # Off here and in RuntimeConfig (default, see reasoning there).
+    # Turned on in the clean-audio profile.
+    # 0.25/2000 is the best VAD-on operating point found.
     vad_filter: bool = False
-    vad_threshold: float = 0.25
-    vad_min_silence_ms: int = 2000
+    vad_threshold: float = 0.25 # controls how loud a pause must be before VAD opens a speech region (decode stability)
+    vad_min_silence_ms: int = 2000 # controls how long a pause must run before VAD closes an already-open speech region
     # Padding applied either side of every detected speech region. Doubles as the
     # bridge that stops short excisions from splitting an utterance: regions less
     # than 2*vad_speech_pad_ms apart merge, so no cut shorter than 4s survives.
@@ -129,19 +99,11 @@ class DecodeOptions:
 class WeightRef:
     """Where a backend should load weights from.
 
-    The two runtimes take different things, so this cannot collapse to one string:
-
-    openai-whisper  load_model() only attaches DTW alignment heads when handed a
-                    *registered model name*; handed a file path it sets
-                    alignment_heads=None and word timestamps degrade. So `ref` is
-                    the model name and the staging directory travels separately in
-                    `download_root`, where _download() sha256-checks the pre-staged
-                    file and skips the network.
-    faster-whisper  CTranslate2 conversions carry their own alignment heads, so
-                    there is no name requirement -- but bare size names resolve
-                    through a repo mapping that changes between library versions.
-                    `ref` is therefore always an explicit local directory or an
-                    explicit HuggingFace repo id, never a size name.
+    Cannot collapse to one string, because the runtimes want different forms:
+    openai-whisper needs a *registered model name* (a path sets
+    alignment_heads=None and degrades word timestamps), so the directory travels
+    separately in `download_root`; faster-whisper needs an explicit directory or
+    repo id, never a size name, since that mapping shifts between versions.
     """
     ref: str
     download_root: Optional[str] = None
@@ -192,12 +154,6 @@ class OpenAIWhisperBackend(WhisperBackend):
             self._warned_deterministic = True
 
         if opts.vad_filter and not self._warned_vad:
-            # say so rather than ignoring it silently: bench uses the DecodeOptions
-            # defaults, so an openai run would request VAD, not get it, and be
-            # compared against a CT2 run that did -- without anyone noticing.
-            # Measured on 600s of crowd noise: openai 19 repeated segments, CT2
-            # unfiltered 31, CT2 with VAD 0. openai is the better *unfiltered*
-            # decoder here and still loses, because it has no VAD to enable.
             logger.warning(
                 "openai-whisper has no VAD; vad_filter is ignored. It falls back to "
                 "the decoder's own no_speech_prob, which does not suppress "
@@ -250,42 +206,17 @@ class OpenAIWhisperBackend(WhisperBackend):
 
 
 class _DeterministicFallback:
-    """Replaces whisper's *sampled* retry with a deterministic escalation.
+    """Replaces whisper's *sampled* retry rungs with a deterministic escalation.
 
-    Whisper retries a decode that trips compression_ratio_threshold or
-    logprob_threshold, walking up a temperature ladder. Every rung above 0 samples
-    (faster-whisper: beam_size=1, sampling_topk=0, num_hypotheses=best_of), and
-    that sampling cannot be seeded -- ctranslate2.set_random_seed has no effect on
-    it, verified with forced sampling and with the seed set before model
-    construction, and Whisper.generate() has no per-call seed. So the shipped
-    decoder is not reproducible.
+    The retry's value is the reject-and-retry loop, not the randomness -- sampling
+    is only how faster-whisper makes a retry come out differently. This proxy sits
+    in front of the CTranslate2 model and swaps each sampled rung for the
+    corresponding entry below, keeping the loop and dropping the randomness.
 
-    The retry's value is not the randomness, though: it is the reject-and-retry
-    loop around it. Sampling is only how faster-whisper makes a retry come out
-    differently. Escalating deterministic parameters instead keeps the loop and
-    drops the randomness. This proxy sits in front of the CTranslate2 model and
-    swaps each sampled rung for the corresponding entry below.
-
-    Measured on 600s of NBAallstar (repeated segments, lower is better):
-
-        no retry at all (temperature=[0.0])   228   reproducible
-        deterministic ladder                   55   reproducible
-        shipped sampled ladder                 30   NOT reproducible
-
-    So it recovers most of the suppression and all of the reproducibility. FLEURS
-    en is unchanged at 4.33% WER / 2.08% CER, because clean speech rarely trips a
-    threshold and so rarely reaches a rung above 0.
-
-    Off by default: the residual gap to the sampled ladder is real, and on real
-    media the run-to-run variation the sampled ladder causes is 10-18% WER without
-    a matching swing in defect counts. Turn it on when reproducibility is worth
-    more than the last of the repetition suppression -- benchmarking, diffing two
-    runs, cache keys, QA sign-off.
-
-    This reaches into faster-whisper's call into CTranslate2, so it is coupled to
-    that call's keyword arguments and should be re-checked on upgrade. If those
-    names change, the proxy stops intervening rather than misbehaving: `enabled`
-    only fires when a `sampling_temperature` keyword is actually present.
+    It is coupled to faster-whisper's call into CTranslate2 and should be
+    re-checked on upgrade. If those keyword names change it stops intervening
+    rather than misbehaving, since it only fires when `sampling_temperature` is
+    present. Measurements in README.
     """
 
     # index i replaces temperature ladder rung i. Rung 0 is never reached (a
@@ -361,12 +292,10 @@ class FasterWhisperBackend(WhisperBackend):
         # Installed unconditionally and armed per decode from DecodeOptions, so
         # the flag can vary call to call without rebuilding the model.
         #
-        # It is not free when disabled: generate() takes an extra Python call, and
-        # every *other* attribute faster-whisper reads off the CTranslate2 object
+        # generate() takes an extra Python call, and
+        # every other attribute faster-whisper reads off the CTranslate2 object
         # (encode, align, detect_language, device, is_multilingual) now resolves
-        # through __getattr__ rather than directly. Measured at +58ms on a 3.9s
-        # decode, +1.5%, with byte-identical output. Cheap enough to leave in
-        # place; not zero, as an earlier version of this comment claimed.
+        # through __getattr__ rather than directly.
         self._fallback = _DeterministicFallback(self.model.model)
         self.model.model = self._fallback
 
@@ -375,8 +304,8 @@ class FasterWhisperBackend(WhisperBackend):
             return self._run(fpath, opts)
         except IndexError as e:
             # faster-whisper's find_alignment() raises IndexError when the DTW pass
-            # gets an empty frame array, reproducible on sung audio at full 30s
-            # length. Degrade to segment-level timings rather than lose the file:
+            # gets an empty frame array.
+            # Degrade to segment-level timings rather than lose the file:
             # to_sentences() falls back to segment boundaries when words are absent.
             if not opts.word_timestamps:
                 raise

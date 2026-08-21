@@ -7,8 +7,10 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends build-essential ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
-# which backends to install: "ct2" omits torch entirely (production),
-# "all" adds openai-whisper + torch + benchmark deps
+# which backends to install: "ct2" is production, "all" adds openai-whisper and
+# the benchmark deps. torch is no longer selected by this -- punctuation
+# restoration puts it in install_requires, so every build has it; see
+# PUNCTUATION in setup.py.
 ARG EXTRAS=ct2
 
 COPY setup.py .

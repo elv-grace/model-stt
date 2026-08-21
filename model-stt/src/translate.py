@@ -2,9 +2,7 @@
 
 Timestamps are never round-tripped through the model. Each source sentence
 already carries its own [start, end] from whisper's word alignment, so we
-translate the *text* and keep the span. This is the main departure from
-model-multilingual-stt, which asked the LLM to echo back a word->timestamp list
-and dropped the entire file's output on any JSON parse failure.
+translate the text and keep the span.
 
 Batches are id-tagged so a reply can be validated per sentence; anything the
 batch reply misses is retried individually, and a sentence that still fails is
@@ -129,11 +127,7 @@ def _extract_json(raw: str) -> Dict:
     """Parse a JSON object out of a model reply.
 
     Tries the whole string first (ollama's format="json" usually delivers clean
-    JSON), then falls back to the outermost braces. Note the fallback spans from
-    the first '{' to the *last* '}' -- matching to the first '}' truncates any
-    reply containing nested objects, which is what made the equivalent code in
-    model-multilingual-stt fail on well-formed output.
-    """
+    JSON), then falls back to the outermost braces."""
     try:
         return json.loads(raw)
     except json.JSONDecodeError:

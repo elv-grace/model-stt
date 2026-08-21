@@ -84,8 +84,6 @@ def main() -> int:
 
     for lang in args.langs:
         code = LANG_CODES.get(lang, lang.split('_')[0])
-        # over-fetch so that after intersecting with the English pool we still
-        # have close to --limit usable samples
         # stream and keep only ids that exist in English, stopping at --limit:
         # the two configs are not ordered alike, so a fixed over-fetch either
         # wastes downloads or silently returns fewer samples than asked for

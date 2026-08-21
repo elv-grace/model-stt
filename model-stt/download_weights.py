@@ -9,7 +9,8 @@ The cache is then either baked into an image by build.sh or mounted into the
 container at run time, so container starts never touch the network.
 
 Sizes: large-v3-turbo 1.62 GB per backend, large-v3 3.09 GB per backend
-(9.42 GB for all four combinations).
+(9.42 GB for all four combinations), plus 2.2 GB for the punctuation model, which
+is fetched by default and skipped with --no-punctuation.
 """
 from __future__ import annotations
 
@@ -47,6 +48,19 @@ def download_ct2(entry: dict, dest: str) -> None:
     snapshot_download(repo_id=entry["ct2_repo"], local_dir=target)
 
 
+def download_punctuation(model: str, dest: str) -> None:
+    from huggingface_hub import snapshot_download
+
+    target = os.path.join(dest, model.replace("/", "--"))
+    if os.path.isfile(os.path.join(target, "config.json")):
+        print(f"  punctuation/{model} already present")
+        return
+    print(f"  downloading punctuation/{model} ...")
+    # flattened repo id, matching src/punctuate.py's _local_weights, so the model
+    # loads from the cache with no network at container start
+    snapshot_download(repo_id=model, local_dir=target, ignore_patterns=["*.onnx", "*.h5"])
+
+
 def main() -> int:
     models = config["models"]
     parser = argparse.ArgumentParser()
@@ -57,6 +71,9 @@ def main() -> int:
     # checkpoints are needed only to reproduce bench comparisons
     parser.add_argument('--backends', nargs='+', default=['ct2'],
                         choices=['openai', 'ct2'])
+    parser.add_argument('--no-punctuation', action='store_true',
+                        help='skip the punctuation model (2.2 GB); the tagger then '
+                             'falls back to whisper\'s own punctuation')
     args = parser.parse_args()
 
     os.makedirs(args.dest, exist_ok=True)
@@ -67,6 +84,11 @@ def main() -> int:
             download_openai(model_name, entry, os.path.join(args.dest, "openai"))
         if 'ct2' in args.backends:
             download_ct2(entry, os.path.join(args.dest, "faster-whisper"))
+
+    punctuation = config.get("postprocessing", {}).get("punctuation", {})
+    if not args.no_punctuation and punctuation.get("enabled", True):
+        print("punctuation:")
+        download_punctuation(punctuation["model"], os.path.join(args.dest, "punctuation"))
 
     print(f"\nweights staged under {args.dest}")
     return 0

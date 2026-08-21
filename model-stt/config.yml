@@ -32,9 +32,8 @@ models:
     translate: false
 
   # DISABLED -- not shipped. large-v3 exists only for whisper's native translation
-  # (path B), which measured far worse than transcribe-then-LLM: BLEU 31 vs 42
-  # (fr), 9.8 vs 34.6 (ko), 14.8 vs 32.1 (zh), while also silently dropping whole
-  # files. For transcription it is 2.6x slower than turbo with no reliable gain,
+  # (path B), which measured worse than transcribe-then-LLM.
+  # For transcription it is 2.6x slower than turbo with no reliable gain,
   # and on real media it was less stable (mid-file script switching, lost
   # punctuation). Uncomment to reproduce the bench comparisons.
   # large-v3:
@@ -50,28 +49,31 @@ models:
 postprocessing:
   # Applied ONLY to a trailing run that reaches the end of the file with no
   # terminal punctuation -- the dropped-full-stop case, where there is no
-  # punctuation to trust and a long silence is the best boundary evidence there
-  # is. A pause inside a *punctuated* sentence no longer ends a caption: that
-  # tore real sentences apart whenever the pause in them was genuine.
+  # punctuation to trust and a long silence is the best boundary evidence there is.
   sentence_gap: 5000
 
   # Backstop for whisper's degenerate no-punctuation decode, which once produced a
   # single 1595-word caption. A caption with more words than this is split at its
   # widest internal pause, repeatedly.
-  #
-  # Keyed on word count, not duration: duration does not measure how much a
-  # caption contains, and a 3-word caption spanning minutes is not too long while
-  # a 1595-word one is.
-  #
-  # 150 because no single spoken sentence runs that long in any language, so
-  # anything above it is a decode failure by construction -- deliberately NOT
-  # tuned to this fixture set, where it would sit near 100 (~2x the p99 of 47).
-  # The extra headroom costs nothing: the failure case is 1595 words, 34x beyond
-  # p99, so any value from ~150 to ~500 catches it identically, while 150 leaves
-  # legitimately long captions alone (0.08% of the set, against 0.28% at 100).
-  # This is a safety valve, not a classifier -- if it fires often, something
-  # upstream is wrong.
+  # Keyed on word count, not duration. This is a safety valve, not a classifier.
   max_caption_words: 150
+
+  punctuation:
+    enabled: true
+    # Same weights model-asr uses (src/pretty.py), so the two systems' sentence
+    # boundaries are decided by the same model and stay comparable.
+    model: oliverguhr/fullstop-punctuation-multilang-large
+    window: 200
+    stride: 150
+    batch_size: 16
+    # Whether the model may remove a full stop whisper emitted, merging two
+    # captions. Off, and not a tuning knob. Measured, the worst merges are the
+    # most confident ones, so no threshold separates them from the good ones.
+    demote_terminal: false
+    demote_confidence: 0.9
+    # false => a missing or unloadable model logs a warning and falls back to
+    # whisper's own punctuation. true => the tagger fails instead.
+    required: false
 
 runtime:
   default:
@@ -81,91 +83,66 @@ runtime:
     language: null          # null => detect per file
     word_level: true
     sentence_level: true
-    # see RuntimeConfig.carry_context: measured to suppress whole files at long
-    # prompt lengths and to leak language across files. Enable only for
-    # contiguous same-language segments.
+    
     carry_context: false
 
-    # Decode everything; let the decoder's own guards do the filtering.
-    #
-    # VAD is off by default because it is the binding constraint on real media,
-    # and it fails *silently*: audio it discards never reaches the decoder, so
-    # over-filtering leaves no low-confidence segment and no repetition signal
-    # behind, only missing time. Measured over 13.2h of fixtures, turning it off
-    # returned 6.6% more words, recovered 30 minutes of arena PA announcements
-    # that Silero scored as non-speech at threshold 0.5 *and* 0.25 alike, and cost
-    # 32 extra artifact-shaped captions against 460 extra substantive ones.
-    #
-    # condition_on_previous_text is the other half and is not optional here. With
-    # VAD off the decoder sees noise it was previously shielded from, and a
-    # conditioned decode locks onto a phrase and repeats it. That looping is prompt
-    # feedback, not a silence artifact: over NBAallstar 1680-1740s a conditioned
-    # decode returned "Thank you." on repeat, while the same audio decoded
-    # unconditioned returned the real "The USA First World Tournament... Voting
-    # will be over at the...". Turning conditioning off does not merely suppress
-    # the repeats, it recovers the speech underneath them -- which is why there is
-    # no post-hoc repetition filter anywhere in this pipeline. Dropping the
-    # repeated segments would have deleted that content instead of restoring it.
-    #
-    # Also faster: running Silero over a whole file costs more than decoding the
-    # parts it would have discarded (102x realtime against 95x).
     vad_filter: false
     condition_on_previous_text: false
+
+    deterministic_fallback: true
+
+    # faster-whisper's "skip silence before possible hallucinations" heuristic.
+    # It fires on is_segment_anomaly -- words that are unusually long, short or improbable --
+    # and when such a segment is bracketed by quiet it moves the decoder's seek
+    # pointer past the audio entirely, so nothing about the skip is visible
+    # downstream: no low-confidence segment, no repetition, just a gap.
+    # Raise it to 4.0-8.0 for long live-action film with a lot of score and in-world radio, 
+    # where the audio this deletes is real speech.
+    # Do not raise it for animation or live sports, where 2.0 measured best.
+    # Note the whole range spans ~1.5%, and disabling it entirely is ~25% faster
+    # to decode because the skip re-decodes overlapping windows.
+    hallucination_silence_threshold: 2.0
+
     # only consulted when a profile turns vad_filter back on
     vad_threshold: 0.25
     vad_min_silence_ms: 2000
     vad_speech_pad_ms: 2000
 
-    # Isolated-artifact guard. NOT a general hallucination filter -- it catches
-    # one specific failure, the stock phrase ("Thank you.") whisper emits over
-    # non-speech because subtitle data is full of it. It cannot catch a confident
-    # one-off invention like a wrong proper noun, and nothing here tries to:
-    # every confidence signal whisper exposes was measured NOT to separate
-    # invented text from real (see README).
-    #
+    # Isolated-artifact guard.
     # Surfaced here rather than left in RuntimeConfig because the three thresholds
     # decide whether real speech gets deleted, and the right values are
     # content-dependent. A file must contain at least `min_count` copies of the
-    # same short text, that text must be isolated *as a rule* (median gap to its
+    # same short text, that text must be isolated as a rule (median gap to its
     # nearest neighbour at or above `gap`), and only the copies that are
     # themselves isolated are dropped. Raise `gap` or `min_count` to be more
     # conservative; set `gap` to 0 to disable entirely.
-    #
-    # Deliberately self-calibrating rather than a list of known whisper phrases:
-    # such a list could only be assembled by reading one fixture set and would not
-    # transfer to another language. Held out one file at a time on the fixtures,
-    # the learned phrases stayed stable and no verified-real caption was dropped.
     isolated_artifact_gap: 10.0
     isolated_artifact_max_words: 3
     isolated_artifact_min_count: 4
 
-  # Reproducible decoding. Replaces whisper's sampled retry rungs with a
-  # deterministic escalation, so the same input gives byte-identical output.
-  #
-  # The shipped decoder is NOT reproducible and cannot be made so by seeding:
-  # ctranslate2.set_random_seed has no effect on the sampling (verified with
-  # forced sampling and with the seed set before model construction) and
-  # Whisper.generate() has no per-call seed. Run-to-run divergence measured at
-  # 10-18% WER on the same file, because one retry shifts a segment boundary and
-  # re-segments everything after it.
-  #
-  # Costs some repetition suppression -- 55 repeated segments on a 600s slice
-  # against the sampled ladder's 30, where no retry at all gives 228 -- and is
-  # slower, since retries use beam search rather than greedy sampling. FLEURS is
-  # unchanged. Compose it with a content profile by passing both, e.g.
-  # {"profile": "clean-audio", "deterministic_fallback": true}.
-  reproducible:
-    deterministic_fallback: true
+  # Whisper's original sampled retry ladder, which is NOT reproducible: the same
+  # input gives different captions every run.
+  # Kept because it is the upstream behaviour
+  # and because its failure mode differs -- sampled retries produce fewer, longer,
+  # more varied inventions where deterministic ones produce more short duplicates.
+  # Reach for it only when reproducibility is not wanted and the isolated-artifact
+  # guard is off; otherwise the default is strictly better here. It measured
+  # 8-10% slower.
+  stochastic:
+    deterministic_fallback: false
+
+  # Retained as an alias so existing callers passing {"profile": "reproducible"}
+  # keep working. The default is now reproducible, so this sets nothing.
+  reproducible: {}
 
   # VAD on, for content with distinguishable silence: scripted film and TV, studio
   # recordings, anything where speech is separated by real quiet rather than by a
   # score or a crowd. Suppresses the stock-phrase artifacts whisper emits over
   # non-speech, at the cost of dropping speech mixed into continuous noise.
-  #
   # Not Silero's own defaults (0.5 / 2000 / 400). At threshold 0.5 the filter drops
-  # dialogue mixed under a loud score -- 292s of it on a 10-minute animated feature
-  # -- and speech_pad_ms doubles as the bridge that stops a short excision from
-  # splitting an utterance, since regions less than 2*pad apart merge. Raise the
+  # dialogue mixed under a loud score and speech_pad_ms doubles as the bridge that 
+  # stops a short excision from splitting an utterance, 
+  # since regions less than 2*pad apart merge. Raise the
   # threshold towards 0.5 only for sparse speech over steady noise.
   clean-audio:
     vad_filter: true

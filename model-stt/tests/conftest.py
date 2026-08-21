@@ -17,6 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.backends import DecodeOptions, Segment, Transcription, WhisperBackend, Word  # noqa: E402
 from src.model import RuntimeConfig, WhisperSTT  # noqa: E402
+from src.punctuate import PunctuationConfig  # noqa: E402
 
 # mirrors the models: block in config.yml
 MODELS = {
@@ -80,6 +81,10 @@ def make_model(monkeypatch, tmp_path):
         monkeypatch.setattr("src.model.build_backend", lambda **_: backend)
         # every media path is treated as having audio unless a test says otherwise
         monkeypatch.setattr("src.model.has_audio_stream", lambda _: True)
+        # same reason the backend is faked: punctuation restoration is a 2.2 GB
+        # download these tests must not need. A test that wants it passes its own
+        # punctuator= (see FakePunctuator) or a punctuation= config.
+        kwargs.setdefault("punctuation", PunctuationConfig(enabled=False))
         model = WhisperSTT(
             cfg or RuntimeConfig(),
             models=MODELS,
