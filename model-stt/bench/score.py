@@ -5,7 +5,7 @@ model-asr and model-multilingual-stt identically regardless of which container
 produced the file.
 
     python -m bench.score --hyp bench-output/turbo-ct2.jsonl --ref refs/ --task asr
-    python -m bench.score --hyp bench-output/translate-ct2.jsonl --ref refs-en/ --task translation
+    (disabled) python -m bench.score --hyp bench-output/translate-ct2.jsonl --ref refs-en/ --task translation
 
 Normalization is the part that decides whether the numbers mean anything.
 Whisper emits punctuated, cased text and model-asr does not, so WER computed on
@@ -67,27 +67,106 @@ def hypothesis_text(by_file: Dict[str, List[dict]]) -> Dict[str, str]:
     }
 
 
+# A cue index line, and a cue timing line. Presence of the latter is what marks a
+# reference as SRT rather than plain text.
+SRT_TIMING = re.compile(r"\d{1,2}:\d{2}:\d{2}[,.]\d{1,3}\s*-->")
+SRT_INDEX = re.compile(r"^\s*\d+\s*$")
+
+
+# Non-speech content a subtitle carries that a transcript never should. Stripped
+# here rather than left to the normalizer: EnglishTextNormalizer happens to remove
+# brackets and parentheses too, but the reference should not depend on which
+# normalizer is selected.
+SUBTITLE_MARKUP = [
+    (re.compile(r"<[^>]*>"), " "),            # <i>italics</i>, <font ...>
+    (re.compile(r"\{[^}]*\}"), " "),          # {\an8} positioning
+    (re.compile(r"\[[^\]]*\]"), " "),         # [GUNSHOT], [indistinct]
+    (re.compile(r"\([^)]*\)"), " "),          # (laughing)
+    # The note goes, the lyric stays: whisper transcribes singing, so dropping the
+    # words would book real output as insertions.
+    (re.compile(r"[♪♫♩♬]"), " "),
+    (re.compile(r"^\s*[-–—]\s*", re.M), " "),  # dialogue dashes, per line
+    # Speaker labels, all-caps (MAN:) or title case (Peter:, Aunt May:). At most
+    # two words, so "Rule number one: never..." is left alone. A one-word
+    # "Question:" is still caught, which is the accepted false positive -- it is
+    # applied to hypothesis and reference alike, so it cannot bias the score.
+    (re.compile(r"^\s*[A-Z][A-Za-z0-9.'-]{0,15}(?: [A-Z][A-Za-z0-9.'-]{0,15})?\s*:", re.M), " "),
+]
+
+
+def parse_srt(text: str) -> str:
+    """Flatten an SRT subtitle file to the words a speaker actually says.
+
+    Parsed by cue block rather than line by line, so a digits-only *subtitle* line
+    ("1985", a shouted count) survives: an index line is only dropped when it
+    opens a block and is followed by a timing line. A line-based filter deletes
+    such dialogue silently."""
+    body = text.replace("﻿", "").replace("\r\n", "\n").replace("\r", "\n")
+
+    spoken: List[str] = []
+    for block in re.split(r"\n\s*\n", body):
+        lines = [line.strip() for line in block.split("\n") if line.strip()]
+        if not lines:
+            continue
+        if SRT_INDEX.match(lines[0]) and len(lines) > 1 and SRT_TIMING.search(lines[1]):
+            lines = lines[2:]
+        else:
+            lines = [line for line in lines if not SRT_TIMING.search(line)]
+        spoken.extend(lines)
+
+    out = "\n".join(spoken)
+    for pattern, replacement in SUBTITLE_MARKUP:
+        out = pattern.sub(replacement, out)
+    return " ".join(out.split())
+
+
 def load_references(ref: str) -> Dict[str, str]:
-    """A directory of <media-basename>.txt files, or a single JSON mapping."""
+    """A directory of <media-basename>.txt files, or a single JSON mapping.
+
+    A .txt holding SRT cue timings is parsed as SRT; anything else is read as a
+    plain transcript.
+    """
     if os.path.isdir(ref):
         refs = {}
-        for name in os.listdir(ref):
-            if name.endswith(".txt"):
-                with open(os.path.join(ref, name)) as f:
-                    refs[os.path.splitext(name)[0]] = f.read().strip()
+        for name in sorted(os.listdir(ref)):
+            if not name.endswith(".txt"):
+                continue
+            with open(os.path.join(ref, name), encoding="utf-8-sig") as f:
+                body = f.read()
+            if SRT_TIMING.search(body[:8000]) or " --> " in body[:8000]:
+                body = parse_srt(body)
+            refs[os.path.splitext(name)[0]] = body.strip()
         return refs
     with open(ref) as f:
         return {os.path.splitext(k)[0]: v for k, v in json.load(f).items()}
 
 
 def pair(hyps: Dict[str, str], refs: Dict[str, str]) -> List[tuple]:
+    """Match each hypothesis to its reference by media stem.
+
+    Exact stem first. Falling back to the reference's leading id token lets a
+    reference carry a human-readable suffix -- "AFGM1_jessep_cross.txt" against
+    "afgm1.mp4" -- which is how the hand-verified set is named. The fallback is
+    rejected if the id is ambiguous, so a silent mispairing cannot slip through
+    and score one clip against another's transcript.
+    """
+    by_id: Dict[str, List[str]] = defaultdict(list)
+    for key in refs:
+        by_id[key.split("_")[0].lower()].append(key)
+
     pairs = []
     for name, hyp in sorted(hyps.items()):
         stem = os.path.splitext(name)[0]
-        if stem not in refs:
-            logger.warning(f"no reference for {name}, skipping")
+        if stem in refs:
+            pairs.append((stem, hyp, refs[stem]))
             continue
-        pairs.append((stem, hyp, refs[stem]))
+        candidates = by_id.get(stem.lower(), [])
+        if len(candidates) == 1:
+            pairs.append((stem, hyp, refs[candidates[0]]))
+        elif len(candidates) > 1:
+            logger.warning(f"{name} matches several references {candidates}, skipping")
+        else:
+            logger.warning(f"no reference for {name}, skipping")
     if not pairs:
         raise SystemExit("no hypothesis/reference pairs matched")
     return pairs
@@ -131,6 +210,7 @@ def score_asr(pairs: List[tuple], normalize: Callable[[str], str], language: str
 
 
 def score_translation(pairs: List[tuple], normalize: Callable[[str], str]) -> dict:
+    # DISABLED translation task
     import sacrebleu
 
     hyps = [normalize(h) for _, h, _ in pairs]

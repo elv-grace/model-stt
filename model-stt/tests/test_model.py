@@ -494,11 +494,12 @@ def test_default_does_not_split_good_luck_guys(make_model):
     assert (sentences[0].start_time, sentences[0].end_time) == (126710, 333920)
 
 
-def test_deterministic_fallback_is_off_by_default_and_reaches_the_backend(make_model, hello_world):
+def test_deterministic_fallback_is_on_by_default_and_reaches_the_backend(make_model, hello_world):
+    """Reproducible decoding is the shipped default; the `stochastic` profile opts out."""
     default = make_model(hello_world)
     default.tag(FILE)
-    assert default.backend.calls[0].deterministic_fallback is False
+    assert default.backend.calls[0].deterministic_fallback is True
 
-    opted_in = make_model(hello_world, cfg=RuntimeConfig(deterministic_fallback=True))
-    opted_in.tag(FILE)
-    assert opted_in.backend.calls[0].deterministic_fallback is True
+    opted_out = make_model(hello_world, cfg=RuntimeConfig(deterministic_fallback=False))
+    opted_out.tag(FILE)
+    assert opted_out.backend.calls[0].deterministic_fallback is False

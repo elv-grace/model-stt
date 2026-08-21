@@ -2,7 +2,7 @@
 #
 # Build the model-stt container.
 #
-#   WEIGHTS=turbo-ct2 ./build.sh     the shipped image: CT2 + turbo   (~1.6 GB weights)
+#   WEIGHTS=turbo-ct2 ./build.sh     the shipped image: CT2 + turbo
 #   WEIGHTS=none      ./build.sh     no baked weights; mount the cache at run time
 #
 # full-ct2 and all additionally stage large-v3 and/or the openai checkpoints. They

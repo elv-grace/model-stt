@@ -6,6 +6,7 @@ from common_ml.utils import nested_update
 
 from config import config
 from src.model import RuntimeConfig, WhisperSTT
+from src.punctuate import PunctuationConfig
 
 # DISABLED (translation): path C's translator config
 # from src.translate import TranslatorConfig
@@ -33,6 +34,9 @@ if __name__ == '__main__':
         weights_dir=config["storage"]["weights_dir"],
         sentence_gap_ms=config["postprocessing"]["sentence_gap"],
         max_caption_words=config["postprocessing"]["max_caption_words"],
+        punctuation=from_dict(
+            PunctuationConfig, config["postprocessing"].get("punctuation", {})
+        ),
         # DISABLED (translation): translate_fallback / translator_cfg
     )
 

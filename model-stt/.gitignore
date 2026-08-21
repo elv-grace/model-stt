@@ -1,15 +1,26 @@
-test-files/
+test-files/*.mp4
+test-files/movies
+test-files/sports
 test-output/
 test-output-default-filtered/
 test-output-new/
 test-output-twostage/
 test-output-twostage-filtered/
+test-output-sony-movies/
+test-output-hand-val-ref-set/
+test-output-sony-movies-guard-tuned/
+test-output-7films-guard-tuned/
 # weights staged into the build context by build.sh (up to 9.4 GB)
 models/
 # runtime caches mounted into the container by the tester
 .cache/
 .asr-cache/
-# bench artifacts
+bench/__pycache__
+src/__pycache__
+tests/__pycache__
+# for comparing against bench/score.py
+bench/model-asr-benchmark-score.py
+# bench artifacts for choosing between openai-whisper and faster-whisper, large-v3 or large-v3-turbo models, model configs (VAD, artifact isolation, the deterministic ladder or stochastic fallback, punctuation), and current STT or whisper
 bench-output/
 bench-fleurs/
 bench-asr/

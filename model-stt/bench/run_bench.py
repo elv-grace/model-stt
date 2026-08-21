@@ -1,4 +1,4 @@
-"""Speed benchmark for the model-stt configurations.
+"""Speed benchmark for the model-stt configurations (openai-whisper vs. faster-whisper (ct2), large-v3 vs. large-v3-turbo).
 
 Runs one or more (backend, model) combinations over the same files and reports
 real-time factor, so the two runtimes and the two model sizes are directly
@@ -11,9 +11,7 @@ flatters short runs.
 
 Output: bench-output/<system>.jsonl (tags) and bench-output/summary.json.
 
-model-asr and model-multilingual-stt run in their own containers with
-incompatible dependency stacks, so they are not driven from here. Run them
-separately and score their .jsonl output with bench/score.py, which reads the
+Can also score model-asr and model-multilingual-stt .jsonl output with bench/score.py, which reads the
 same format.
 """
 from __future__ import annotations
@@ -30,6 +28,7 @@ from loguru import logger
 
 from config import config
 from src.model import RuntimeConfig, WhisperSTT
+from src.punctuate import PunctuationConfig
 # DISABLED (translation): from src.translate import TranslatorConfig
 
 # the combinations worth comparing; --systems selects a subset
@@ -38,7 +37,7 @@ SYSTEMS: Dict[str, RuntimeConfig] = {
     "turbo-openai": RuntimeConfig(backend="openai", model_name="large-v3-turbo"),
     "turbo-ct2": RuntimeConfig(backend="faster-whisper", model_name="large-v3-turbo"),
     # path A on the undistilled weights: what turbo's 4-layer decoder costs in
-    # transcription accuracy, as opposed to translation (which it cannot do at all)
+    # transcription accuracy, as opposed to translation (which it cannot do)
     "large-v3-openai": RuntimeConfig(backend="openai", model_name="large-v3"),
     "large-v3-ct2": RuntimeConfig(backend="faster-whisper", model_name="large-v3"),
     # DISABLED (translation): path B (whisper native translate, needs large-v3)
@@ -127,6 +126,10 @@ def run_system(
         weights_dir=config["storage"]["weights_dir"],
         sentence_gap_ms=config["postprocessing"]["sentence_gap"],
         max_caption_words=config["postprocessing"]["max_caption_words"],
+        # Punctuation off: the bench measures the decoder, and FLEURS is
+        # scored through EnglishTextNormalizer, which strips punctuation before
+        # comparing.
+        punctuation=PunctuationConfig(enabled=False),
     )
     load_seconds = time.perf_counter() - load_start
 
