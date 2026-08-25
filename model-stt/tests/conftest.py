@@ -16,6 +16,7 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.backends import DecodeOptions, Segment, Transcription, WhisperBackend, Word  # noqa: E402
+from src.diarize import Diarization, DiarizationConfig, SpeakerTurn  # noqa: E402
 from src.model import RuntimeConfig, WhisperSTT  # noqa: E402
 from src.punctuate import PunctuationConfig  # noqa: E402
 
@@ -36,8 +37,43 @@ MODELS = {
 }
 
 
-def word(text: str, start: float, end: float, probability: float = 0.9) -> Word:
-    return Word(start=start, end=end, word=text, probability=probability)
+def word(
+    text: str,
+    start: float,
+    end: float,
+    probability: float = 0.9,
+    speaker: Optional[str] = None,
+) -> Word:
+    return Word(
+        start=start, end=end, word=text, probability=probability, speaker=speaker
+    )
+
+
+def diarization(turns, raw=None, duration: float = 1000.0) -> Diarization:
+    """A Diarization from (start, end, speaker) tuples.
+
+    `raw` is the pre-exclusive timeline, where speakers may overlap; it defaults
+    to the same turns, i.e. nobody talking over anybody.
+    """
+    spans = [SpeakerTurn(*turn) for turn in turns]
+    overlapping = [SpeakerTurn(*turn) for turn in (turns if raw is None else raw)]
+    return Diarization(spans, overlapping, duration)
+
+
+class FakeDiarizer:
+    """Stands in for SpeakerDiarizer: no subprocess, no GPU, no model bundle."""
+
+    def __init__(self, result: Optional[Diarization]):
+        self.result = result
+        self.calls: List[str] = []
+        self.resets = 0
+
+    def diarize(self, fpath: str) -> Optional[Diarization]:
+        self.calls.append(fpath)
+        return self.result
+
+    def reset(self) -> None:
+        self.resets += 1
 
 
 def segment(

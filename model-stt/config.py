@@ -16,6 +16,16 @@ def load_config() -> Any:
     if weights_dir:
         config.setdefault('storage', {})['weights_dir'] = weights_dir
 
+    # Same idea for the diarization binary and the ONNX Runtime it loads: the
+    # container builds both into /opt/diarize and points these at them, while a
+    # checkout leaves them unset and config.yml's repo-relative paths apply.
+    # ORT_DYLIB_PATH is the variable speakrs itself reads, so setting it once
+    # configures both ends.
+    for key, variable in (("binary", "DIARIZE_BINARY"), ("ort_lib", "ORT_DYLIB_PATH")):
+        value = os.getenv(variable)
+        if value:
+            config.setdefault('diarization', {})[key] = value
+
     # storage paths may be absolute, ~-relative (weight caches live under the
     # user's home), or relative to config.yml
     filedir = os.path.dirname(os.path.abspath(path))

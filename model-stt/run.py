@@ -5,6 +5,7 @@ from common_ml.tagging.run_helpers import catch_errors, get_params, run_default
 from common_ml.utils import nested_update
 
 from config import config
+from src.diarize import DiarizationConfig
 from src.model import RuntimeConfig, WhisperSTT
 from src.punctuate import PunctuationConfig
 
@@ -20,6 +21,13 @@ if __name__ == '__main__':
     # overridden field by field
     params = get_params()
     profile = params.pop("profile", "default")
+    # Diarization is configured beside the runtime profile rather than inside
+    # it, like punctuation: it is a separate model with its own weights, and the
+    # profiles select decoder behaviour. Overridden per run field by field, e.g.
+    # {"diarization": {"enabled": true, "mode": "cpu"}}.
+    diarization = nested_update(
+        config.get("diarization", {}), params.pop("diarization", {})
+    )
     defaults = config["runtime"].get(profile)
     if defaults is None:
         raise ValueError(
@@ -37,6 +45,7 @@ if __name__ == '__main__':
         punctuation=from_dict(
             PunctuationConfig, config["postprocessing"].get("punctuation", {})
         ),
+        diarization=from_dict(DiarizationConfig, diarization),
         # DISABLED (translation): translate_fallback / translator_cfg
     )
 

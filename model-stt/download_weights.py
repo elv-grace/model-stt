@@ -61,6 +61,49 @@ def download_punctuation(model: str, dest: str) -> None:
     snapshot_download(repo_id=model, local_dir=target, ignore_patterns=["*.onnx", "*.h5"])
 
 
+# speakrs' model bundle, for src/diarize.py. Listed file by file rather than
+# snapshot_download'ed whole because the repo also carries the CoreML and
+# int8/fp16 variants, which are several GB this never loads.
+#
+# The first three groups are what speakrs' own required_files() fetches for CUDA.
+# The last entry is not: speakrs 0.5.0 downloads the multi-mask tail for CUDA but
+# then loads wespeaker-voxceleb-resnet34-tail.onnx unconditionally once a split
+# backend is available (src/inference/embedding/load/sessions.rs:111 -- the
+# batched variants beside it are guarded by .exists(), this one is not), so
+# from_pretrained on CUDA dies with "does not exist". Staging the file it wants
+# is the fix that does not involve patching speakrs.
+DIARIZATION_FILES = [
+    # PLDA transform
+    "plda_lda.npy", "plda_tr.npy", "plda_mu.npy", "plda_psi.npy",
+    "plda_mean1.npy", "plda_mean2.npy",
+    "wespeaker-voxceleb-resnet34.min_num_samples.txt",
+    # segmentation and embedding
+    "segmentation-3.0.onnx", "segmentation-3.0-b32.onnx",
+    "wespeaker-voxceleb-resnet34.onnx", "wespeaker-voxceleb-resnet34.onnx.data",
+    "wespeaker-voxceleb-resnet34-b64.onnx",
+    # split fbank + multi-mask tail, the CUDA embedding path
+    "wespeaker-fbank.onnx", "wespeaker-fbank-b32.onnx",
+    "wespeaker-multimask-tail.onnx", "wespeaker-multimask-tail-b32.onnx",
+    # loaded unconditionally by speakrs 0.5.0; see above
+    "wespeaker-voxceleb-resnet34-tail.onnx",
+]
+
+DIARIZATION_REPO = "avencera/speakrs-models"
+
+
+def download_diarization(dest: str) -> None:
+    from huggingface_hub import hf_hub_download
+
+    os.makedirs(dest, exist_ok=True)
+    for filename in DIARIZATION_FILES:
+        if os.path.isfile(os.path.join(dest, filename)):
+            print(f"  speakrs/{filename} already present")
+            continue
+        print(f"  downloading speakrs/{filename} ...")
+        # local_dir keeps the flat layout ModelBundle::from_dir expects
+        hf_hub_download(repo_id=DIARIZATION_REPO, filename=filename, local_dir=dest)
+
+
 def main() -> int:
     models = config["models"]
     parser = argparse.ArgumentParser()
@@ -74,6 +117,14 @@ def main() -> int:
     parser.add_argument('--no-punctuation', action='store_true',
                         help='skip the punctuation model (2.2 GB); the tagger then '
                              'falls back to whisper\'s own punctuation')
+    # Diarization ships disabled, so unlike punctuation the useful flag is the
+    # one that turns staging ON: you stage the weights, then enable it. With it
+    # enabled in config.yml the weights are fetched without asking, because a
+    # tagger configured to diarize and missing its models is not a state worth
+    # supporting.
+    parser.add_argument('--diarization', action='store_true',
+                        help='stage speakrs\' diarization models (~170 MB) even if '
+                             'config.yml has diarization disabled')
     args = parser.parse_args()
 
     os.makedirs(args.dest, exist_ok=True)
@@ -89,6 +140,13 @@ def main() -> int:
     if not args.no_punctuation and punctuation.get("enabled", True):
         print("punctuation:")
         download_punctuation(punctuation["model"], os.path.join(args.dest, "punctuation"))
+
+    diarization = config.get("diarization", {})
+    if args.diarization or diarization.get("enabled", False):
+        print("diarization:")
+        # matches diarization.models_dir in config.yml, which resolves relative
+        # paths against this same weights root
+        download_diarization(os.path.join(args.dest, diarization.get("models_dir") or "speakrs"))
 
     print(f"\nweights staged under {args.dest}")
     return 0

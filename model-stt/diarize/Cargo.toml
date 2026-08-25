@@ -1,0 +1,34 @@
+# Thin CLI over speakrs, which is a Rust *library* with no binary of its own and
+# no Python bindings. Kept as a separate crate so nothing in speakrs is patched.
+#
+# The dependency is the published crate, so a container build needs no checkout
+# beside this one. 0.5.0 on crates.io is the same source as the upstream tag; to
+# build against a local clone instead, uncomment the patch below (cargo requires
+# the clone's version to match the one resolved here).
+[package]
+name = "stt-diarize"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"  # speakrs is edition 2024
+publish = false
+
+# Own workspace root, so cargo does not go looking upward for one.
+[workspace]
+
+# [patch.crates-io]
+# speakrs = { path = "../../speakrs" }
+
+[[bin]]
+name = "stt-diarize"
+path = "src/main.rs"
+
+[dependencies]
+# load-dynamic: resolve libonnxruntime.so at runtime from ORT_DYLIB_PATH rather
+# than linking a build-time download. The CUDA execution provider needs
+# Microsoft's ORT-GPU build (see build.sh) rather than what ort downloads by
+# default, so the choice is forced.
+speakrs = { version = "0.5.0", features = ["cuda", "load-dynamic"] }
+serde_json = "1"
+
+[profile.release]
+lto = "thin"

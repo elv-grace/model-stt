@@ -8,8 +8,14 @@ Output tracks:
   "auto_captions" sentence-level tags
 
 Every tag carries additional_info["language"] so downstream consumers never have
-to infer a track's language from the config that produced it, 
+to infer a track's language from the config that produced it,
 additional_info["model"], and additional_info["min/mean_word_probability"].
+
+With diarization enabled (off by default, see src/diarize.py) both tracks also
+carry additional_info["speaker"], captions break at a change of speaker, and
+caption tags carry additional_info["speaker_coverage"] and ["speaker_overlap"]
+to say how much the label should be trusted. Diarization never removes a word:
+one it cannot place is emitted with a null speaker.
 
 Timestamps are relative to the file passed to tag(), matching the rest of the
 tagger runtime.
@@ -35,6 +41,7 @@ from common_ml.tagging.models.av import AVModel
 from common_ml.utils.metrics import timeit
 
 from .backends import DecodeOptions, Segment, WhisperBackend, Word, build_backend
+from .diarize import Diarization, DiarizationConfig, SpeakerDiarizer, build_diarizer
 from .punctuate import PunctuationConfig, PunctuationRestorer, build_punctuator
 from .sentences import Sentence, to_sentences
 # DISABLED (translation): path C's LLM translator
@@ -148,6 +155,8 @@ class WhisperSTT(AVModel):
         max_caption_words: int = 100,
         punctuation: Optional[PunctuationConfig] = None,
         punctuator: Optional[PunctuationRestorer] = None,
+        diarization: Optional[DiarizationConfig] = None,
+        diarizer: Optional[SpeakerDiarizer] = None,
     ):
         self.cfg = cfg
         self.sentence_gap_ms = sentence_gap_ms
@@ -180,6 +189,16 @@ class WhisperSTT(AVModel):
                 device=cfg.device,
             )
 
+        # Injectable for the same reasons as the punctuator, and additionally
+        # because the diarizer holds a subprocess and a GPU model that a unit
+        # test has no way to provide.
+        if diarizer is not None:
+            self.diarizer: Optional[SpeakerDiarizer] = diarizer
+        else:
+            self.diarizer = build_diarizer(
+                diarization or DiarizationConfig(), weights_dir=weights_dir
+            )
+
         self._prev_tail: Optional[str] = None
         self._prev_language: Optional[str] = None
 
@@ -190,9 +209,16 @@ class WhisperSTT(AVModel):
         carries safely within a run; a benchmark or batch job that walks
         unrelated files must reset between them or a previous file's language
         can contaminate the next.
+
+        Speaker identity carries across the same boundary and breaks the same
+        way: the diarizer matches each part's voices against the ones it has
+        already seen, and without a reset the speakers of one asset go on
+        collecting the voices of the next.
         """
         self._prev_tail = None
         self._prev_language = None
+        if self.diarizer is not None:
+            self.diarizer.reset()
 
     def _transcribe_with_guards(self, fpath: str, opts: DecodeOptions):
         """Decode, re-running without the carried prompt if it looks harmful.
@@ -257,6 +283,13 @@ class WhisperSTT(AVModel):
         segments = self._drop_isolated_artifacts(segments)
         segments = self._repunctuate(segments)
 
+        # Last, and deliberately outside every filter above: diarization only
+        # annotates. It runs on the file's audio rather than on what survived
+        # filtering, and it adds a field to words that are already staying.
+        diarization = self.diarizer.diarize(fpath) if self.diarizer is not None else None
+        if diarization is not None:
+            segments = _assign_speakers(segments, diarization)
+
         # detected per file; path B used to force "en" here since whisper's
         # translate task emits English regardless of the source language
         text_language = result.language
@@ -267,11 +300,15 @@ class WhisperSTT(AVModel):
 
         tags: List[Tag] = []
         if self.cfg.word_level:
-            tags.extend(self._word_tags(segments, fpath, text_language))
+            tags.extend(self._word_tags(segments, fpath, text_language, diarization))
 
         sentences = to_sentences(segments, self.sentence_gap_ms, self.max_caption_words)
         if self.cfg.sentence_level:
-            tags.extend(self._sentence_tags(sentences, fpath, text_language, SENTENCE_TRACK))
+            tags.extend(
+                self._sentence_tags(
+                    sentences, fpath, text_language, SENTENCE_TRACK, diarization
+                )
+            )
 
         # DISABLED (translation): path C emitted an English sentence track here,
         #   if self.translator is not None and sentences:
@@ -418,7 +455,11 @@ class WhisperSTT(AVModel):
         return [seg for i, seg in enumerate(segments) if i not in drop]
 
     def _word_tags(
-        self, segments: List[Segment], fpath: str, language: Optional[str]
+        self,
+        segments: List[Segment],
+        fpath: str,
+        language: Optional[str],
+        diarization: Optional[Diarization],
     ) -> List[Tag]:
         tags = []
         for seg in segments:
@@ -426,6 +467,20 @@ class WhisperSTT(AVModel):
                 text = word.word.strip()
                 if not text:
                     continue
+                info = {
+                    "language": language,
+                    "probability": round(word.probability, 4),
+                    "avg_logprob": round(seg.avg_logprob, 4),
+                    "no_speech_prob": round(seg.no_speech_prob, 4),
+                    # repetition signals, so a consumer can filter on the
+                    # same evidence _filter_segments uses
+                    "compression_ratio": round(seg.compression_ratio, 3),
+                    "temperature": round(seg.temperature, 2),
+                }
+                if diarization is not None:
+                    # explicitly null where diarization ran and placed nobody, so
+                    # that reads differently from a track that never had speakers
+                    info["speaker"] = word.speaker
                 tags.append(
                     Tag(
                         start_time=self._to_milliseconds(word.start),
@@ -433,22 +488,18 @@ class WhisperSTT(AVModel):
                         source_media=fpath,
                         tag=text,
                         track=WORD_TRACK,
-                        additional_info={
-                            "language": language,
-                            "probability": round(word.probability, 4),
-                            "avg_logprob": round(seg.avg_logprob, 4),
-                            "no_speech_prob": round(seg.no_speech_prob, 4),
-                            # repetition signals, so a consumer can filter on the
-                            # same evidence _filter_segments uses
-                            "compression_ratio": round(seg.compression_ratio, 3),
-                            "temperature": round(seg.temperature, 2),
-                        },
+                        additional_info=info,
                     )
                 )
         return tags
 
     def _sentence_tags(
-        self, sentences: List[Sentence], fpath: str, language: Optional[str], track: str
+        self,
+        sentences: List[Sentence],
+        fpath: str,
+        language: Optional[str],
+        track: str,
+        diarization: Optional[Diarization] = None,
     ) -> List[Tag]:
         tags = []
         for s in sentences:
@@ -460,6 +511,16 @@ class WhisperSTT(AVModel):
             if s.min_word_probability is not None:
                 info["min_word_probability"] = s.min_word_probability
                 info["mean_word_probability"] = s.mean_word_probability
+            if diarization is not None:
+                info["speaker"] = s.speaker
+                # How much of this caption anyone was heard speaking over, and
+                # how much of it had more than one person talking. Low coverage
+                # means whisper produced words where the diarizer heard no
+                # speech; high overlap means the single label above was a choice
+                # between voices rather than a reading of one. Both are
+                # confidence signals for the speaker, not for the text.
+                info["speaker_coverage"] = round(diarization.coverage(s.start, s.end), 3)
+                info["speaker_overlap"] = round(diarization.overlap(s.start, s.end), 3)
             tags.append(
                 Tag(
                     start_time=self._to_milliseconds(s.start),
@@ -471,6 +532,28 @@ class WhisperSTT(AVModel):
                 )
             )
         return tags
+
+
+def _assign_speakers(segments: List[Segment], diarization: Diarization) -> List[Segment]:
+    """Attach a speaker to every word, and change nothing else.
+
+    Timings, text and probabilities are untouched, and no word is removed: a
+    word the diarizer places nowhere keeps speaker None and is emitted like any
+    other. Segment spans do not move either -- whisper's own segmentation is
+    left as it is, and the caption track re-groups on speaker later, in
+    to_sentences.
+    """
+    out: List[Segment] = []
+    for seg in segments:
+        if not seg.words:
+            out.append(seg)
+            continue
+        words = [
+            replace(word, speaker=diarization.speaker_at(word.start, word.end))
+            for word in seg.words
+        ]
+        out.append(replace(seg, words=words))
+    return out
 
 
 def _normalize_text(text: str) -> str:
