@@ -1,6 +1,6 @@
 import pytest
 
-from conftest import MODELS, segment, word
+from conftest import MODELS, FakeDiarizer, diarization, segment, word
 from src.backends import Transcription
 from src.model import (
     CONTEXT_CHARS,
@@ -503,3 +503,80 @@ def test_deterministic_fallback_is_on_by_default_and_reaches_the_backend(make_mo
     opted_out = make_model(hello_world, cfg=RuntimeConfig(deterministic_fallback=False))
     opted_out.tag(FILE)
     assert opted_out.backend.calls[0].deterministic_fallback is False
+
+
+# --------------------------------------------------------------------------
+# speaker fields, when diarization is enabled
+# --------------------------------------------------------------------------
+
+def test_speaker_reaches_both_tracks(make_model):
+    transcription = Transcription(language="en", segments=[segment([
+        word(" Hello", 0.0, 0.4),
+        word(" world.", 0.4, 0.9),
+    ])])
+    model = make_model(transcription, diarizer=FakeDiarizer(
+        diarization([(0.0, 2.0, "SPEAKER_00")])
+    ))
+    tags = model.tag(FILE)
+
+    assert all(t.additional_info["speaker"] == "SPEAKER_00" for t in tracks(tags, WORD_TRACK))
+    assert all(t.additional_info["speaker"] == "SPEAKER_00" for t in tracks(tags, SENTENCE_TRACK))
+
+
+def test_a_word_the_diarizer_cannot_place_is_kept_with_a_null_speaker(make_model):
+    # the transcript is not the diarizer's to edit: an unplaced word goes out
+    # labelled null, never dropped
+    transcription = Transcription(language="en", segments=[segment([
+        word(" Hello", 0.0, 0.4),
+        word(" world.", 0.4, 0.9),
+    ])])
+    model = make_model(transcription, diarizer=FakeDiarizer(
+        diarization([(0.0, 0.3, "SPEAKER_00")])
+    ))
+    words = tracks(model.tag(FILE), WORD_TRACK)
+
+    assert [t.tag for t in words] == ["Hello", "world."]
+    assert [t.additional_info["speaker"] for t in words] == ["SPEAKER_00", None]
+
+
+def test_caption_carries_coverage_and_overlap(make_model):
+    transcription = Transcription(language="en", segments=[segment([
+        word(" Hello", 0.0, 1.0),
+        word(" world.", 1.0, 2.0),
+    ])])
+    # someone speaks for the first half only, and is talked over for part of it
+    model = make_model(transcription, diarizer=FakeDiarizer(diarization(
+        [(0.0, 1.0, "SPEAKER_00")],
+        raw=[(0.0, 1.0, "SPEAKER_00"), (0.5, 1.0, "SPEAKER_01")],
+    )))
+    info = tracks(model.tag(FILE), SENTENCE_TRACK)[0].additional_info
+
+    assert info["speaker_coverage"] == pytest.approx(0.5)
+    assert info["speaker_overlap"] == pytest.approx(0.25)
+
+
+def test_captions_break_where_the_speaker_changes(make_model):
+    # two words each side: enough substance to be a turn rather than the
+    # one-word label flip _split_on_speaker rejoins
+    transcription = Transcription(language="en", segments=[segment([
+        word(" Are", 0.0, 0.5),
+        word(" you", 0.5, 1.0),
+        word(" being", 1.5, 1.8),
+        word(" serious?", 1.8, 2.2),
+    ])])
+    model = make_model(transcription, diarizer=FakeDiarizer(diarization(
+        [(0.0, 1.2, "SPEAKER_00"), (1.4, 2.5, "SPEAKER_01")]
+    )))
+    sentences = tracks(model.tag(FILE), SENTENCE_TRACK)
+
+    assert [t.tag for t in sentences] == ["Are you", "being serious?"]
+    assert [t.additional_info["speaker"] for t in sentences] == ["SPEAKER_00", "SPEAKER_01"]
+
+
+def test_no_speaker_fields_at_all_when_diarization_is_off(make_model, hello_world):
+    # absent rather than null: a null speaker means the diarizer looked and
+    # found nobody, which is not what "diarization was never run" means
+    tags = make_model(hello_world).tag(FILE)
+
+    assert all("speaker" not in t.additional_info for t in tags)
+    assert all("speaker_coverage" not in t.additional_info for t in tags)

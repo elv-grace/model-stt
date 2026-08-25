@@ -1,3 +1,37 @@
+# Speaker diarization, off unless DIARIZATION=build. It is a Rust crate over
+# speakrs (see diarize/), needing a toolchain no other stage wants, so it is
+# built apart and the runtime image takes the binary and the ONNX Runtime shared
+# libraries without the ~1.5 GB that produced them.
+#
+# Both variants leave the same two directories behind, so the COPY into the
+# runtime stage does not have to know which one ran. Selected by name --
+# `--build-arg DIARIZATION=build` -- rather than by a truthiness test, because
+# "0" is a non-empty string and every shell-style test here gets that wrong.
+ARG DIARIZATION=none
+
+FROM rust:1.88-slim AS diarize-build
+# pkg-config and libssl-dev are for openssl-sys, which speakrs' `online` feature
+# pulls in through hf-hub's native-tls. That feature is only reached when
+# diarization.models_dir is null; the shipped config stages the bundle instead,
+# but the code path has to compile either way.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates curl gcc g++ make pkg-config libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /build
+COPY diarize/ ./diarize/
+# DIARIZE_CACHE is where build.sh stages onnxruntime-gpu; a fixed path keeps the
+# COPY below independent of $HOME
+RUN DIARIZE_CACHE=/opt/diarize ./diarize/build.sh \
+    && mkdir -p /opt/diarize/bin \
+    && cp diarize/target/release/stt-diarize /opt/diarize/bin/
+
+FROM continuumio/miniconda3:latest AS diarize-none
+RUN mkdir -p /opt/diarize/bin /opt/diarize/onnxruntime
+
+FROM diarize-${DIARIZATION} AS diarize
+
+# main STT
 FROM continuumio/miniconda3:latest
 WORKDIR /elv
 
@@ -27,6 +61,17 @@ COPY models ./models
 # applies and the cache is expected as a mount
 ARG WEIGHTS_DIR=""
 ENV WEIGHTS_DIR=${WEIGHTS_DIR}
+
+# Empty when DIARIZATION=none, in which case config.yml's diarization.binary
+# points at nothing and build_diarizer degrades to no speakers -- which is also
+# what the shipped config asks for, since diarization defaults to disabled.
+COPY --from=diarize /opt/diarize /opt/diarize
+
+# ORT's CUDA execution provider dlopens the same cuBLAS/cuDNN wheels CTranslate2
+# does, so it needs no path of its own; only libonnxruntime.so is extra.
+ENV LD_LIBRARY_PATH=/opt/diarize/onnxruntime:${LD_LIBRARY_PATH}
+ENV ORT_DYLIB_PATH=/opt/diarize/onnxruntime/libonnxruntime.so
+ENV DIARIZE_BINARY=/opt/diarize/bin/stt-diarize
 
 COPY src ./src
 COPY config.yml config.py run.py download_weights.py ./

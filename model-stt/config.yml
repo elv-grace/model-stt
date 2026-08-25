@@ -75,6 +75,100 @@ postprocessing:
     # whisper's own punctuation. true => the tagger fails instead.
     required: false
 
+# Speaker diarization (who spoke when), via speakrs. Off by default: it is a
+# second model on the same GPU, and a caption track without speakers is still a
+# caption track. Turn it on per run with {"diarization": {"enabled": true}}.
+#
+# Stage its two halves first:
+#   ./diarize/build.sh                          # binary + onnxruntime-gpu
+#   python download_weights.py --diarization    # speakrs' models, ~170 MB
+#
+# With it on, both tracks gain additional_info["speaker"], captions break at a
+# change of speaker, and caption tags gain speaker_coverage and speaker_overlap
+# to say how far the label should be trusted. It never removes a word: one it
+# cannot place is emitted with a null speaker. See src/diarize.py.
+diarization:
+  enabled: false
+
+  # Built by diarize/build.sh. Relative to the repo root.
+  binary: diarize/target/release/stt-diarize
+
+  # speakrs' model bundle. Relative paths resolve against storage.weights_dir,
+  # so this rides along with the whisper weights into a baked image or a mounted
+  # cache. null makes the binary download from HuggingFace at run time instead,
+  # which is a network dependency at container start AND hits an upstream bug on
+  # CUDA -- see "staging the bundle" in README.md.
+  models_dir: speakrs
+
+  # Staged by diarize/build.sh. Must be Microsoft's onnxruntime-gpu build: it is
+  # the only one carrying the CUDA execution provider.
+  ort_lib: ~/.cache/model-stt/onnxruntime/libonnxruntime.so
+
+  # cuda | cpu. Upstream also has a cuda-fast mode, deliberately not exposed:
+  # see the DISABLED note in diarize/src/main.rs.
+  mode: cuda
+
+  # Bridge same-speaker turns closer together than this. 0 keeps speakrs' own
+  # segmentation, which already merges what its clustering reads as one turn.
+  merge_gap: 0.0
+
+  # Drop turns shorter than this before any word is assigned. Collapsing the
+  # timeline to one speaker per frame leaves slivers where two speakers trade
+  # the top score mid-word, and a sliver should not win a word.
+  # Measured over 1862 turns from 20 film excerpts: turns under 0.15s are 10.4%
+  # of all turns but 0.3% of speech time, and the under-0.05s bucket alone is 6%
+  # of turns averaging 24ms -- one or two frames, at a 16.875ms frame step. That
+  # is the sliver population. Raising this past ~0.3s starts costing real
+  # one-word interjections, which then go out with a null speaker.
+  min_duration: 0.15
+
+  # Dendrogram merge distance for speakrs' clustering; null keeps its own 0.6.
+  # Lower splits more readily. It is the only granularity lever speakrs exposes,
+  # and it does NOT fix the short-response merging described under "what it gets
+  # wrong" in README.md -- 0.6 down to 0.2 all merge the same two voices there,
+  # because the 0.5s replies never get a distinctive enough embedding to cluster
+  # apart. Left at speakrs' default because no value measured better here.
+  ahc_threshold: null
+
+  # Cosine similarity at which a speaker in this part is judged to be one
+  # already seen in an earlier part -- what keeps SPEAKER_00 meaning one person
+  # across a whole film rather than per part.
+  #
+  # Measured on 20 film excerpts, each diarized whole and then in halves, using
+  # the whole-clip labelling as truth (31 same-person and 228 different-person
+  # cross-half pairs). The two distributions OVERLAP -- same-person pairs run
+  # 0.07..0.94 (median 0.76), different-person 0.14..0.78 (median 0.14) -- so no
+  # value separates them and this is a choice about which error to make:
+  #
+  #     thr    identities recovered    speakers wrongly merged
+  #     0.50        24/31                      11/228
+  #     0.55        21/31                       8/228
+  #     0.60        19/31                       5/228
+  #     0.65        19/31                       3/228
+  #     0.70        17/31                       1/228
+  #
+  # 0.65 because 0.60 is strictly worse at the same recall, and because the two
+  # errors are not equal: splitting one person across two labels is visible and
+  # harmless, while merging two people asserts they are one. Expect roughly a
+  # third of speakers to pick up a fresh label in a later part. Lower it if
+  # labels fragment more than you can live with.
+  match_threshold: 0.65
+
+  # Seconds before the diarizer is killed and the file goes out unlabelled.
+  timeout: 1800.0
+
+  # Retries for a failed run. speakrs' concurrent CUDA path aborts on a heap
+  # corruption roughly once in 40 runs here, with no pattern in the input -- the
+  # same audio that crashed then succeeds 25 times running. It is native memory
+  # corruption in code this repo does not own, which is the reason the diarizer
+  # is a subprocess: it cannot take the decoder with it. One retry turns a rare
+  # crash into a rare slowdown.
+  retries: 1
+
+  # false => a missing binary, missing models or a failed run logs a warning and
+  # the usual tracks are emitted without speakers. true => the tagger fails.
+  required: false
+
 runtime:
   default:
     backend: faster-whisper

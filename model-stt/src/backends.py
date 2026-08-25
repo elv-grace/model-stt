@@ -36,6 +36,12 @@ class Word:
     end: float
     word: str
     probability: float
+    # Filled in after decoding by src/diarize.py, never by a backend -- whisper
+    # has no notion of who is talking. None means either that diarization was
+    # off, or that it ran and placed no speaker over this word; the tag carries
+    # the distinction as a null speaker either way, and a word is never dropped
+    # for it. See "no word is ever dropped" in src/diarize.py.
+    speaker: Optional[str] = None
 
 
 @dataclass(frozen=True)

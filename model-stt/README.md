@@ -22,6 +22,9 @@ The three configurations that were evaluated, and why this one:
 | `""` | Word-level tags, one per word. |
 | `"auto_captions"` | Sentence-level tags. |
 
+With [speaker diarization](#speaker-diarization) enabled (off by default) both tracks also carry a
+`speaker`, and a caption ends at a change of speaker as well as at punctuation.
+
 A caption ends at terminal punctuation (`. ? ! 。 ？ ！`, with abbreviation and initial exceptions so
 `"Mr. Anthony Eden"` stays one tag) — the same primary rule as model-asr's `_merge_to_sentences`.
 Whisper's own segments are decoder windows, not sentences, so the sentence track is rebuilt from word
@@ -98,6 +101,152 @@ They are **not** a hallucination score; see [recall and hallucination](#recall-a
 Word timings are always computed — the sentence track needs them to place its boundaries.
 `word_level: false` suppresses word *tags*, it does not disable word *timing*.
 
+## Speaker diarization
+
+Off by default. Turned on per run with `{"diarization": {"enabled": true}}`, it answers *who spoke
+when* and attaches the answer to the tracks above:
+
+| Field | On | Meaning |
+|---|---|---|
+| `speaker` | both tracks | `SPEAKER_00`, or `null` where the diarizer placed nobody. |
+| `speaker_coverage` | captions | Fraction of the caption anyone was heard speaking over. |
+| `speaker_overlap` | captions | Fraction with more than one person talking. |
+
+A caption also ends at a change of speaker, so no caption spans two known speakers. That rule only
+*adds* boundaries — it can never remove a punctuation boundary, so when diarization is wrong or
+absent the captions are exactly what punctuation alone produces.
+
+**Diarization never edits the transcript.** It runs after the decode, on the file's audio, and adds a
+field to words that are already staying. A word it cannot place goes out with a null speaker, never
+dropped. If it fails outright, the tags are byte-identical to running with it off (unless
+`required: true`, which turns that silent degradation into a failure).
+
+### The engine
+
+[speakrs](https://github.com/avencera/speakrs) — a Rust implementation of pyannote's `community-1`
+pipeline — kept as an unmodified upstream checkout. It is a library with no binary and no Python
+bindings, so `diarize/` is a small crate over it and `src/diarize.py` drives that binary: ffmpeg
+decodes to 16 kHz mono PCM, the PCM goes over a pipe, one JSON object comes back.
+
+A subprocess rather than bindings because the call is once per file, the tagger already shells out to
+ffmpeg, and — as it turns out — because speakrs' concurrent CUDA path aborts on a heap corruption
+roughly once in 40 runs here, with no pattern in the input. Across the process boundary that is a
+retry (`retries: 1`); in-process it would be the tagger's death. 120s of audio diarizes in ~3s on an
+L40S including model load.
+
+### Staging the bundle
+
+```bash
+./diarize/build.sh                          # binary + onnxruntime-gpu
+python download_weights.py --diarization    # speakrs' models, ~170 MB
+```
+
+Two things must line up, and `build.sh` pins both. `ort` 2.0.0-rc.12 speaks ONNX Runtime 1.24's C
+API, so `Cargo.lock` holds it there — the version requirement alone admits rc.13, which then rejects
+a 1.24 runtime with *"too old; expected >= 1.27.x"*. And the CUDA execution provider ships only in
+Microsoft's `onnxruntime-gpu` build, which is why the crate uses `load-dynamic` and is pointed at
+those libraries rather than at what `ort` downloads itself. The provider then dlopens the same
+cuBLAS/cuDNN wheels CTranslate2 does, so the image's existing `LD_LIBRARY_PATH` already covers it.
+
+`download_weights.py` fetches one file speakrs would not: `wespeaker-voxceleb-resnet34-tail.onnx`.
+speakrs 0.5.0 downloads the multi-mask tail for CUDA but then loads the plain tail unconditionally
+once a split backend is available (`src/inference/embedding/load/sessions.rs:111` — the batched
+variants beside it are guarded by `.exists()`, that one is not), so `from_pretrained` on CUDA dies
+with *"does not exist"*. Staging the file it wants is the fix that leaves speakrs untouched.
+
+For the container, `--build-arg DIARIZATION=build` compiles the crate in a separate Rust stage and
+copies the binary and the runtime into `/opt/diarize`; the default builds neither.
+
+### What it gets wrong
+
+The segmentation model reads a **10-second window** and can represent at most **3 speakers in it, 2
+talking at once** — pyannote's powerset shape, fixed by the weights. That bounds voices per window,
+not per recording: the window steps 1s, and clustering stitches the windows together, so a
+twelve-person film is fine as long as any given ten seconds holds three or fewer voices. Sustained
+crosstalk is where it breaks, and it breaks by *mislabelling* — the losing voice's frames go to
+whichever speaker scored highest.
+
+**Short replies get absorbed.** In the *A Few Good Men* cross-examination, speakrs gives the
+questions and the `"No, sir."` answers one label, over the whole 257s file, at every clustering
+threshold from 0.6 down to 0.2 — the 0.5s replies never get an embedding distinctive enough to
+cluster apart. `ahc_threshold` changes the total speaker count but not this, which is why it ships at
+speakrs' own default.
+
+**Fast exchanges mostly work.** On the *Social Network* bar scene, 2 speakers, 121 turns, 75% of turn
+boundaries are a change of label and 30 of 42 short turns start a new one. Across the hand-validated
+set the same figure runs 30–75% on dialogue scenes and 0–7% on the music-heavy ones.
+
+**Mid-sentence splits are mostly wrong, and had to be guarded.** Where whisper heard one sentence
+and the diarizer disagreed, the unguarded rule split it — and reading the results across seven titles
+found the splits were nearly all one utterance cut in two: `"Thank"` / `"you."`, `"You didn't"` /
+`"stay long."`, `"What are we"` / `"doing here?"`. Neither `speaker_overlap` nor `speaker_coverage`
+separates those from real interruptions; 57–100% of them per title carry no overlap at all. (An
+earlier reading of one hand-checked scene suggested overlap did flag them. At corpus scale it does
+not.)
+
+Two properties do separate them, and `_split_on_speaker` now requires both. A change needs **≥2 words
+on each side** — splits leaving one word were 52% of all splits — and **≥0.2s of silence at the
+boundary** — 87% fell between two contiguous words, which is not how people take turns. Over the same
+seven titles that takes 1270 splits down to 55, and what survives reads as handovers, mostly between
+commentators. Roughly a quarter of the remainder still sit in the 0.2–0.5s band, typically a comma
+followed by a short pause and a label flip; raising `SPEAKER_SPLIT_MIN_GAP` towards 1s removes those
+along with some real ones, and setting it very high stops splitting on speaker altogether.
+
+**There is no music/speech distinction anywhere in this pipeline.** Sung vocals usually read as
+speech, and a singer who sings enough gets their own label, which nothing distinguishes from a
+character's. Instrumental score is the easier case: whisper's stock phrases over it usually fall
+outside every turn, so they come back with no speaker and low `speaker_coverage`.
+
+### Measured on seven titles
+
+15.1 hours of audio, one process, `reset_context()` between files, at ~30x realtime on an L40S:
+
+| title | audio | speakers | words | captions | unlabelled | coverage |
+|---|---|---|---|---|---|---|
+| NBA All-Star | 255.9 m | 30 | 29,353 | 3,644 | 5.9% | 0.90 |
+| NFL | 125.9 m | 8 | 21,413 | 2,528 | 0.0% | 0.97 |
+| The Little Princess | 45.5 m | 11 | 3,733 | 523 | 0.8% | 0.83 |
+| Into the Spider-Verse (10 min) | 9.9 m | 3 | 804 | 205 | 6.2% | 0.79 |
+| Across the Spider-Verse | 147.9 m | 14 | 13,294 | 2,705 | 4.2% | 0.83 |
+| Once Upon a Time in Hollywood | 172.3 m | 23 | 13,809 | 2,413 | 5.8% | 0.79 |
+| The Equalizer | 142.5 m | 21 | 8,103 | 1,607 | 6.6% | 0.74 |
+
+No failures and no diarizer crashes across the run. Attribution is sound at the top of each
+distribution — NFL resolves to two commentators holding 55% and 37% of the airtime — and few speakers
+are airtime dust. Speaker-created caption splits are 0.2–0.7% of captions per title with both guards
+applied.
+
+### Labels across the parts of an asset
+
+speakrs clusters each run on its own, so its `SPEAKER_00` in one part is unrelated to the next part's
+— and the tagger runtime feeds parts. The binary therefore returns a mean embedding per speaker, and
+`src/diarize.py` keeps a registry across calls, renaming each part's labels to asset-wide ones by
+cosine match. `reset_context()` clears it, and must be called between unrelated assets.
+
+`match_threshold` is where this is decided, and the honest summary is that the two distributions
+overlap. Measured over 20 film excerpts, each diarized whole and then in halves, using the whole-clip
+labelling as truth (31 same-person and 228 different-person cross-half pairs):
+
+| threshold | identities recovered | speakers wrongly merged |
+|---|---|---|
+| 0.50 | 24/31 | 11/228 |
+| 0.55 | 21/31 | 8/228 |
+| 0.60 | 19/31 | 5/228 |
+| **0.65** | **19/31** | **3/228** |
+| 0.70 | 17/31 | 1/228 |
+
+Same-person pairs run 0.07–0.94 (median 0.76), different-person 0.14–0.78 (median 0.14), so no value
+separates them; this is a choice about which error to make. 0.65 ships because 0.60 is strictly worse
+at the same recall, and because splitting one person across two labels is visible and harmless while
+merging two people asserts they are one. Expect roughly a third of speakers to pick up a fresh label
+in a later part.
+
+`min_duration` is the other measured default. Collapsing the timeline to one speaker per frame leaves
+slivers where two speakers trade the top score mid-word, and a sliver should not win a word. Over
+1862 turns from those excerpts, turns under 0.15s are 10.4% of turns but 0.3% of speech time, and the
+under-0.05s bucket alone is 6% of turns averaging 24ms — one or two frames at a 16.875ms frame step.
+Past ~0.3s it starts costing real one-word interjections, which then go out with a null speaker.
+
 ## Restoring translation
 
 Everything is commented out rather than deleted. Search for `DISABLED (translation)` in
@@ -123,7 +272,11 @@ Nothing is downloaded at container start. Populate the local cache once:
 ```bash
 python download_weights.py                              # what the image needs, 1.62 GB
 python download_weights.py --backends openai ct2        # adds the bench checkpoints
+python download_weights.py --diarization                # adds speakrs' models, ~170 MB
 ```
+
+`--diarization` is only needed while diarization is still disabled in `config.yml`; once it is
+enabled there, the models are staged without asking.
 
 Two loading subtleties:
 
@@ -140,6 +293,10 @@ Two loading subtleties:
 WEIGHTS=turbo-ct2 ./build.sh     # the shipped image (~1.6 GB decoder + 2.2 GB punctuation model)
 WEIGHTS=none      ./build.sh     # mount the cache at run time instead
 ```
+
+The diarization binary is not built unless asked for: pass `--build-arg DIARIZATION=build` to compile
+`diarize/` in its own Rust stage and copy the result into `/opt/diarize`. See
+[speaker diarization](#speaker-diarization).
 
 `WEIGHTS` also selects the pip extras: anything but `all` installs the CT2 backend only. The `full-ct2` and `all` presets stage `large-v3` and/or the openai checkpoints for `bench/`; neither is needed by this image, and
 both require the corresponding `config.yml` entries to be uncommented first.

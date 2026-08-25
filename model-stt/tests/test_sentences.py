@@ -169,3 +169,188 @@ def test_deterministic_fallback_proxy_swaps_only_sampled_calls():
     assert inner.calls[-1] == {"beam_size": 5, "patience": 1}
 
     assert proxy.other_method() == "forwarded"
+
+
+# --------------------------------------------------------------------------
+# speaker boundaries, when diarization has labelled the words
+# --------------------------------------------------------------------------
+
+def test_speaker_change_ends_a_caption_mid_sentence():
+    # an interruption: whisper heard one sentence, two people said it, and the
+    # handover left a pause where the microphone changed hands
+    seg = segment([
+        word(" Are", 0.0, 0.2, speaker="SPEAKER_00"),
+        word(" you", 0.2, 0.4, speaker="SPEAKER_00"),
+        word(" seriously", 0.9, 1.3, speaker="SPEAKER_01"),
+        word(" asking?", 1.3, 1.7, speaker="SPEAKER_01"),
+    ])
+    sentences = to_sentences([seg], max_gap_ms=5000, max_words=150)
+
+    assert [s.text for s in sentences] == ["Are you", "seriously asking?"]
+    assert [s.speaker for s in sentences] == ["SPEAKER_00", "SPEAKER_01"]
+
+
+def test_one_speaker_throughout_is_one_caption():
+    seg = segment([
+        word(" It", 0.0, 0.2, speaker="SPEAKER_00"),
+        word(" is", 0.2, 0.4, speaker="SPEAKER_00"),
+        word(" fine.", 0.4, 0.8, speaker="SPEAKER_00"),
+    ])
+    sentences = to_sentences([seg], max_gap_ms=5000, max_words=150)
+
+    assert [s.text for s in sentences] == ["It is fine."]
+    assert sentences[0].speaker == "SPEAKER_00"
+
+
+def test_an_unlabelled_word_does_not_split_a_caption():
+    # the diarizer placed nobody on the middle word; that is missing evidence,
+    # not a boundary, and it takes the label of the run it sits in
+    seg = segment([
+        word(" one", 0.0, 0.2, speaker="SPEAKER_00"),
+        word(" two", 0.2, 0.4, speaker=None),
+        word(" three", 0.4, 0.8, speaker="SPEAKER_00"),
+    ])
+    sentences = to_sentences([seg], max_gap_ms=5000, max_words=150)
+
+    assert [s.text for s in sentences] == ["one two three"]
+    assert sentences[0].speaker == "SPEAKER_00"
+
+
+def test_words_before_the_first_label_join_the_run_that_follows():
+    seg = segment([
+        word(" um", 0.0, 0.2, speaker=None),
+        word(" hello", 0.2, 0.4, speaker="SPEAKER_00"),
+    ])
+    sentences = to_sentences([seg], max_gap_ms=5000, max_words=150)
+
+    assert [s.text for s in sentences] == ["um hello"]
+    assert sentences[0].speaker == "SPEAKER_00"
+
+
+def test_wholly_unlabelled_words_make_a_caption_with_no_speaker():
+    seg = segment([word(" music", 0.0, 0.4), word(" lyrics.", 0.4, 0.8)])
+    sentences = to_sentences([seg], max_gap_ms=5000, max_words=150)
+
+    assert sentences[0].speaker is None
+
+
+def test_length_backstop_still_applies_within_one_speaker():
+    # a long unpunctuated monologue is cut by max_words exactly as before;
+    # speaker splitting shortens runs, it does not exempt them
+    words = [word(f" w{i}", i * 0.1, i * 0.1 + 0.05, speaker="SPEAKER_00") for i in range(40)]
+    sentences = to_sentences([segment(words)], max_gap_ms=5000, max_words=10)
+
+    assert len(sentences) > 1
+    assert all(len(s.text.split()) <= 10 for s in sentences)
+    assert all(s.speaker == "SPEAKER_00" for s in sentences)
+
+
+def test_speaker_split_pieces_keep_their_own_timings():
+    seg = segment([
+        word(" my", 0.0, 0.5, speaker="SPEAKER_00"),
+        word(" turn", 0.5, 1.0, speaker="SPEAKER_00"),
+        word(" your", 5.0, 5.5, speaker="SPEAKER_01"),
+        word(" turn", 5.5, 6.0, speaker="SPEAKER_01"),
+    ])
+    sentences = to_sentences([seg], max_gap_ms=5000, max_words=150)
+
+    assert (sentences[0].start, sentences[0].end) == (0.0, 1.0)
+    assert (sentences[1].start, sentences[1].end) == (5.0, 6.0)
+
+
+def test_a_one_word_speaker_flip_does_not_split_a_caption():
+    """The dominant failure mode: one word inside an utterance changes label.
+
+    Over the seven-title run this was 52% of every split diarization made, and
+    it produced captions like "Thank" / "you." -- so a lone word is not enough
+    to end a caption.
+    """
+    seg = segment([
+        word(" Thank", 0.0, 0.3, speaker="SPEAKER_00"),
+        word(" you", 0.3, 0.5, speaker="SPEAKER_05"),
+        word(" very", 0.5, 0.7, speaker="SPEAKER_00"),
+        word(" much.", 0.7, 1.0, speaker="SPEAKER_00"),
+    ])
+    sentences = to_sentences([seg], max_gap_ms=5000, max_words=150)
+
+    assert [s.text for s in sentences] == ["Thank you very much."]
+    # the flip must not name the caption either
+    assert sentences[0].speaker == "SPEAKER_00"
+
+
+def test_a_leading_one_word_flip_is_absorbed_by_what_follows():
+    # "Or" / "you get into a final club?" -- the fragment leads, and the real
+    # speaker is the one holding the rest of the sentence
+    seg = segment([
+        word(" Or", 0.0, 0.2, speaker="SPEAKER_00"),
+        word(" you", 0.2, 0.4, speaker="SPEAKER_01"),
+        word(" get", 0.4, 0.6, speaker="SPEAKER_01"),
+        word(" in?", 0.6, 0.9, speaker="SPEAKER_01"),
+    ])
+    sentences = to_sentences([seg], max_gap_ms=5000, max_words=150)
+
+    assert [s.text for s in sentences] == ["Or you get in?"]
+    assert sentences[0].speaker == "SPEAKER_01"
+
+
+def test_consecutive_flips_collapse_into_one_caption():
+    seg = segment([
+        word(" one", 0.0, 0.2, speaker="SPEAKER_00"),
+        word(" two", 0.2, 0.4, speaker="SPEAKER_01"),
+        word(" three", 0.4, 0.6, speaker="SPEAKER_02"),
+        word(" four", 0.6, 0.8, speaker="SPEAKER_00"),
+        word(" five", 0.8, 1.0, speaker="SPEAKER_00"),
+    ])
+    sentences = to_sentences([seg], max_gap_ms=5000, max_words=150)
+
+    assert [s.text for s in sentences] == ["one two three four five"]
+    assert sentences[0].speaker == "SPEAKER_00"
+
+
+def test_a_speaker_change_between_contiguous_words_does_not_split():
+    """The dominant failure mode after word count: a boundary out of step.
+
+    Nobody takes over mid-phrase with no pause at all, but a diarizer boundary
+    a word or two off whisper's timings looks exactly like that -- 87% of splits
+    over the seven-title run, producing "You didn't" / "stay long." So a change
+    with no silence in it is not a turn, however much substance sits either
+    side.
+    """
+    seg = segment([
+        word(" You", 0.0, 0.2, speaker="SPEAKER_00"),
+        word(" didn't", 0.2, 0.4, speaker="SPEAKER_00"),
+        word(" stay", 0.4, 0.6, speaker="SPEAKER_01"),
+        word(" long.", 0.6, 0.9, speaker="SPEAKER_01"),
+    ])
+    sentences = to_sentences([seg], max_gap_ms=5000, max_words=150)
+
+    assert [s.text for s in sentences] == ["You didn't stay long."]
+
+
+def test_the_pause_is_measured_between_words_not_captions():
+    # the gap that counts is the silence at the boundary itself, so a long
+    # pause elsewhere in the caption does not license a split
+    seg = segment([
+        word(" One", 0.0, 0.2, speaker="SPEAKER_00"),
+        word(" moment", 3.0, 3.4, speaker="SPEAKER_00"),
+        word(" please", 3.4, 3.7, speaker="SPEAKER_01"),
+        word(" sir.", 3.7, 4.0, speaker="SPEAKER_01"),
+    ])
+    sentences = to_sentences([seg], max_gap_ms=5000, max_words=150)
+
+    assert [s.text for s in sentences] == ["One moment please sir."]
+
+
+def test_undiarized_words_group_exactly_as_before():
+    # with diarization off every speaker is None, and this rule never fires
+    seg = segment([
+        word(" Hello", 0.0, 0.4),
+        word(" world.", 0.4, 0.9),
+        word(" How", 1.0, 1.2),
+        word(" are", 1.2, 1.4),
+        word(" you?", 1.4, 1.8),
+    ])
+    sentences = to_sentences([seg], max_gap_ms=5000, max_words=150)
+
+    assert [s.text for s in sentences] == ["Hello world.", "How are you?"]
+    assert all(s.speaker is None for s in sentences)
